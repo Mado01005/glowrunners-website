@@ -459,7 +459,7 @@ a {
 }
 
 @media (max-width: 768px) {
-  .hero-main-title { font-size: 3rem; }
+  .hero-main-title { font-size: 3rem; margin-bottom: 0.75rem; }
   .hero-headline { font-size: 2rem; }
   .hero-logo-center { height: 80px; }
   .steps-grid { grid-template-columns: 1fr; }
