@@ -167,8 +167,8 @@ function paymentState(participant: Participant, event: PostRunEvent) {
   return {
     kind: "deposit" as const,
     amountPaid,
-      remaining,
-      label: `🟡 Deposit ${formatCompactMoney(amountPaid)} EGP`,
+    remaining,
+    label: `🟡 Deposit ${formatCompactMoney(amountPaid)} EGP`,
     longLabel: "Deposit Verified",
   };
 }
@@ -1492,7 +1492,7 @@ export function PostRunEventsDashboard() {
                         ["all", "All"],
                         ["unpaid", "Unpaid (0 EGP)"],
                         ["deposit", "Deposit Paid"],
-                        ["cleared", "Fully Cleared"],
+                        ["cleared", "Cleared"],
                       ] as const
                     ).map(([value, label]) => (
                       <button

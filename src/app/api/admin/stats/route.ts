@@ -55,42 +55,24 @@ export async function GET(request: Request) {
       headers: NO_STORE_HEADERS,
     });
   } catch (error) {
-    if (
-      isMissingAttendanceDataError(error) ||
-      isRateLimitedSheetsError(error)
-    ) {
-      console.warn(
-        JSON.stringify({
-          level: "warn",
-          message: "Attendance data is unavailable; returning zeroed stats.",
-          route: "/api/admin/stats",
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
+    const warning = isRateLimitedSheetsError(error)
+      ? "Live data is temporarily rate-limited; retrying automatically."
+      : isMissingAttendanceDataError(error)
+        ? "Attendance sheet is not available yet."
+        : "Live attendance data is temporarily unavailable.";
 
-      return NextResponse.json(
-        responseBody(
-          emptyGateDashboard(),
-          isRateLimitedSheetsError(error)
-            ? "Live data is temporarily rate-limited; retrying automatically."
-            : "Attendance sheet is not available yet.",
-        ),
-        { headers: NO_STORE_HEADERS },
-      );
-    }
-
-    console.error(
+    console.warn(
       JSON.stringify({
-        level: "error",
-        message: "Unable to load gate stats.",
+        level: "warn",
+        message: "Attendance data is unavailable; returning zeroed stats.",
         route: "/api/admin/stats",
         error: error instanceof Error ? error.message : String(error),
       }),
     );
 
     return NextResponse.json(
-      { success: false, error: "Unable to load gate statistics." },
-      { status: 500, headers: NO_STORE_HEADERS },
+      responseBody(emptyGateDashboard(), warning),
+      { headers: NO_STORE_HEADERS },
     );
   }
 }

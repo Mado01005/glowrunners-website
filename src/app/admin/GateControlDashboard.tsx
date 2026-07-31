@@ -1442,11 +1442,19 @@ export function GateControlDashboard() {
     }
   };
 
-  const receivedAmount = Number(paymentDraft?.amountReceived ?? 0);
+  const receivedAmount = Number(paymentDraft?.amountReceived ?? "");
+  const hasValidReceivedAmount =
+    Number.isFinite(receivedAmount) && receivedAmount >= 0;
+  const paymentDifference = hasValidReceivedAmount
+    ? Math.round((receivedAmount - ENTRY_FEE_EGP) * 100) / 100
+    : 0;
+  const isExactPayment =
+    hasValidReceivedAmount && Math.abs(paymentDifference) < 0.01;
+  const isShortPayment =
+    hasValidReceivedAmount && paymentDifference < -0.01;
   const modalChange =
-    paymentDraft?.paymentMethod === "Cash" &&
-    Number.isFinite(receivedAmount)
-      ? Math.max(0, receivedAmount - ENTRY_FEE_EGP)
+    paymentDraft?.paymentMethod === "Cash" && paymentDifference > 0
+      ? paymentDifference
       : 0;
 
   return (
@@ -1926,9 +1934,23 @@ export function GateControlDashboard() {
                 className="mt-1 min-h-12 w-full rounded-xl border border-white/10 bg-black px-4 text-lg font-black text-white outline-none focus:border-pink-400"
               />
             </label>
-            <div className="mt-3 rounded-xl border border-rose-400/20 bg-rose-400/[0.08] px-4 py-3 text-center text-sm font-black text-rose-200">
-              🔴 RETURN CHANGE: {money(modalChange)}
-            </div>
+            {isExactPayment ? (
+              <div className="mt-3 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.08] px-4 py-3 text-center text-sm font-black text-emerald-200">
+                🟢 EXACT AMOUNT
+              </div>
+            ) : modalChange > 0 ? (
+              <div className="mt-3 rounded-xl border border-rose-400/20 bg-rose-400/[0.08] px-4 py-3 text-center text-sm font-black text-rose-200">
+                🔴 RETURN CHANGE: {money(modalChange)}
+              </div>
+            ) : isShortPayment ? (
+              <div className="mt-3 rounded-xl border border-amber-400/20 bg-amber-400/[0.08] px-4 py-3 text-center text-sm font-black text-amber-200">
+                🟡 AMOUNT SHORT: {money(Math.abs(paymentDifference))}
+              </div>
+            ) : (
+              <div className="mt-3 rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-center text-sm font-black text-zinc-400">
+                ENTER AMOUNT RECEIVED
+              </div>
+            )}
             <div className="mt-4 grid min-w-0 grid-cols-2 gap-2">
               <button
                 type="button"
