@@ -1,13 +1,40 @@
 {
-  "name": "glowrunners-website",
-  "version": "1.0.0",
-  "description": "Glowrunners community landing page",
+  "name": "glowrunners",
+  "version": "0.1.0",
+  "private": true,
   "scripts": {
-    "dev": "vite --port 3000 --host",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.6.1",
+    "google-auth-library": "^11.0.0",
+    "googleapis": "^173.0.0",
+    "html5-qrcode": "^2.3.8",
+    "next": "^15.5.22",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "vite": "^5.0.0"
+    "@eslint/eslintrc": "^3.3.6",
+    "@tailwindcss/postcss": "^4.3.2",
+    "@types/node": "^22.10.10",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "eslint": "^9.19.0",
+    "eslint-config-next": "^15.5.22",
+    "postcss": "^8.5.25",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "gaxios": "7.3.0",
+    "google-auth-library": "$google-auth-library",
+    "postcss": "$postcss",
+    "sharp": "0.35.3"
   }
 }

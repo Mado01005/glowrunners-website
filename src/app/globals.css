@@ -1,0 +1,280 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --glow-coral: #ff8376;
+  --glow-coral-strong: #ff5f4f;
+  --sunrise-yellow: #ffc865;
+  --ticket-bg: #121212;
+  --ticket-panel: #181514;
+  --admin-ink: #07120d;
+  --admin-muted: #52615a;
+  --admin-green: #0f9f5f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  overflow-x: hidden;
+}
+
+body {
+  background: #000;
+  color: #fff;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.ticket-shell {
+  width: 100%;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  overflow-x: hidden;
+  padding: clamp(12px, 5vw, 22px);
+  background:
+    linear-gradient(160deg, rgba(255, 200, 101, 0.16), transparent 34%),
+    radial-gradient(circle at 50% -8%, rgba(255, 131, 118, 0.32), transparent 30rem),
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.035) 0,
+      rgba(255, 255, 255, 0.035) 1px,
+      transparent 1px,
+      transparent 14px
+    ),
+    var(--ticket-bg);
+  color: #fff9f7;
+}
+
+.ticket-card {
+  min-width: 0;
+  width: min(100%, 440px);
+  padding: clamp(22px, 6vw, 30px) clamp(14px, 5vw, 24px)
+    clamp(22px, 6vw, 28px);
+  border: 1px solid rgba(255, 200, 101, 0.38);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 131, 118, 0.16), transparent 40%),
+    linear-gradient(90deg, rgba(255, 200, 101, 0.12), transparent 55%),
+    var(--ticket-panel);
+  box-shadow:
+    0 32px 92px rgba(0, 0, 0, 0.58),
+    0 0 0 6px rgba(255, 131, 118, 0.05);
+  text-align: center;
+}
+
+.ticket-brand {
+  margin: 0 0 20px;
+  color: var(--sunrise-yellow);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.ticket-name {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: clamp(2rem, 8vw, 3.2rem);
+  line-height: 1.02;
+  font-weight: 900;
+  text-wrap: balance;
+}
+
+.ticket-meta {
+  margin: 12px 0 24px;
+  overflow-wrap: anywhere;
+  color: #ffd8d3;
+  font-size: 1rem;
+  font-weight: 750;
+}
+
+.qr-frame {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  width: min(100%, 326px);
+  aspect-ratio: 1;
+  margin: 0 auto;
+  overflow: hidden;
+  padding: clamp(12px, 4vw, 20px);
+  border-radius: 8px;
+  background: #fff;
+  border: clamp(4px, 1.5vw, 6px) solid var(--sunrise-yellow);
+  box-shadow:
+    0 0 46px rgba(255, 131, 118, 0.42),
+    0 16px 42px rgba(0, 0, 0, 0.34);
+}
+
+.ticket-subtitle {
+  margin: 24px 0 0;
+  color: #fff6e3;
+  font-size: 1.08rem;
+  font-weight: 700;
+}
+
+.ticket-error {
+  color: #fff;
+}
+
+.ticket-error h1 {
+  margin: 0 0 12px;
+  color: var(--sunrise-yellow);
+}
+
+.admin-shell {
+  min-height: 100svh;
+  padding: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 200, 101, 0.72), #f8fff9 260px),
+    #f8fff9;
+  color: var(--admin-ink);
+}
+
+.admin-main {
+  width: min(100%, 720px);
+  margin: 0 auto;
+}
+
+.admin-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0 14px;
+}
+
+.admin-title {
+  margin: 0;
+  font-size: clamp(1.4rem, 5vw, 2rem);
+  line-height: 1.1;
+  font-weight: 950;
+}
+
+.admin-date {
+  margin: 6px 0 0;
+  color: var(--admin-muted);
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.counter-panel {
+  display: grid;
+  align-items: center;
+  padding: 20px;
+  border: 3px solid #07120d;
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(15, 159, 95, 0.1), transparent 58%),
+    #ffffff;
+  box-shadow: 8px 8px 0 #07120d;
+}
+
+.counter-label {
+  color: var(--admin-muted);
+  font-size: 0.9rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.counter-number {
+  color: var(--admin-green);
+  font-size: clamp(5.2rem, 28vw, 10.5rem);
+  line-height: 0.86;
+  font-weight: 950;
+}
+
+.scanner-panel {
+  position: relative;
+  overflow: hidden;
+  margin-top: 24px;
+  border: 3px solid #111;
+  border-radius: 8px;
+  background: #111;
+  box-shadow: 8px 8px 0 rgba(7, 18, 13, 0.22);
+}
+
+.scanner-box {
+  min-height: min(62svh, 470px);
+  display: grid;
+  place-items: center;
+}
+
+.scanner-box video {
+  width: 100% !important;
+}
+
+.scan-feedback {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: 8px;
+  background: #fff;
+  border: 3px solid #07120d;
+  font-size: 1.1rem;
+  font-weight: 850;
+  box-shadow: 6px 6px 0 rgba(7, 18, 13, 0.18);
+}
+
+.scan-feedback.success {
+  border-color: #0f9f5f;
+  background: #eafff4;
+  color: #075d38;
+}
+
+.scan-feedback.error {
+  border-color: #d63b2c;
+  background: #fff0ee;
+  color: #871f16;
+}
+
+.admin-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.admin-button {
+  min-height: 48px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 8px;
+  background: #101713;
+  color: #fff;
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow: 4px 4px 0 rgba(7, 18, 13, 0.22);
+}
+
+.admin-button.secondary {
+  border: 2px solid #101713;
+  background: #fff;
+  color: #101713;
+}
+
+.success-flash {
+  animation: successFlash 620ms ease-out;
+}
+
+@keyframes successFlash {
+  0% {
+    background: #0f9f5f;
+  }
+  100% {
+    background: #f9fbf7;
+  }
+}

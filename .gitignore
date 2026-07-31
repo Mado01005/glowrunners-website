@@ -1,0 +1,11 @@
+.next
+node_modules
+credentials.json
+.env*.local
+dist
+*.tsbuildinfo
+.vercel
+.playwright-cli
+.env*
+!.env.example
+.DS_Store
