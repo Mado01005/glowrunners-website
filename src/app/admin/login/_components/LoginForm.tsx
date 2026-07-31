@@ -24,8 +24,8 @@ function readErrorMessage(payload: unknown): string | null {
 
 export function LoginForm({ nextPath }: LoginFormProps) {
   const router = useRouter();
-  const [phone, setPhone] = useState("");
-  const [accessCode, setAccessCode] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -47,8 +47,8 @@ export function LoginForm({ nextPath }: LoginFormProps) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          phone,
-          accessCode,
+          username,
+          password,
         }),
       });
       const payload: unknown = await response.json().catch(() => null);
@@ -78,34 +78,34 @@ export function LoginForm({ nextPath }: LoginFormProps) {
       onSubmit={handleSubmit}
     >
       <label className="flex min-w-0 flex-col gap-2 text-xs font-black uppercase tracking-wide text-zinc-300">
-        Admin phone
+        Username
         <input
           className="min-h-14 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-4 py-3 text-base font-bold normal-case tracking-normal text-white outline-none placeholder:text-zinc-600 focus:border-white"
-          name="phone"
-          type="tel"
-          inputMode="tel"
-          autoComplete="tel"
+          name="username"
+          type="text"
+          autoCapitalize="none"
+          autoComplete="username"
           enterKeyHint="next"
-          maxLength={32}
+          maxLength={64}
           required
-          placeholder="010 2527 2693"
-          value={phone}
-          onChange={(event) => setPhone(event.target.value)}
+          placeholder="Iwan, Layal, or 01025272693"
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
         />
       </label>
 
       <label className="flex min-w-0 flex-col gap-2 text-xs font-black uppercase tracking-wide text-zinc-300">
-        Access code
+        Password
         <input
           className="min-h-14 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-4 py-3 text-base font-bold normal-case tracking-normal text-white outline-none placeholder:text-zinc-600 focus:border-white"
-          name="accessCode"
+          name="password"
           type="password"
           autoComplete="current-password"
           enterKeyHint="go"
-          maxLength={512}
+          maxLength={256}
           required
-          value={accessCode}
-          onChange={(event) => setAccessCode(event.target.value)}
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
         />
       </label>
 

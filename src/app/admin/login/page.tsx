@@ -82,8 +82,8 @@ export default async function AdminLoginPage({
             Admin sign in
           </h1>
           <p className="mt-3 text-sm font-semibold leading-6 text-zinc-400">
-            Use your approved Egyptian mobile number and the private event
-            access code.
+            Use your assigned GlowRunners username and password. Usernames are
+            case-insensitive.
           </p>
 
           <LoginForm nextPath={nextPath} />

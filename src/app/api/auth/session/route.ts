@@ -3,18 +3,19 @@ import {
   ADMIN_SESSION_COOKIE_NAME,
   ADMIN_SESSION_COOKIE_OPTIONS,
   createAdminSessionToken,
-  getAdminByPhone,
+  getAdminByUsername,
   getAdminSessionFromRequest,
   isAdminAuthConfigured,
-  verifyAdminAccessCode,
+  normalizeAdminUsername,
+  verifyAdminPassword,
 } from "@/lib/adminAuth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type LoginRequestBody = Readonly<{
-  phone?: unknown;
-  accessCode?: unknown;
+  username?: unknown;
+  password?: unknown;
 }>;
 
 const NO_STORE_HEADERS = {
@@ -56,14 +57,16 @@ function configurationErrorResponse() {
   );
 }
 
-function getLoginAttemptKey(request: Request, phone: string | null) {
+function getLoginAttemptKey(request: Request, username: string | null) {
   const forwardedFor =
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     request.headers.get("x-real-ip")?.trim() ||
     "unknown";
-  const phoneDigits = phone?.replace(/\D/g, "").slice(-15) || "missing";
+  const normalizedUsername = username
+    ? normalizeAdminUsername(username).slice(0, 80)
+    : "missing";
 
-  return `${forwardedFor}:${phoneDigits}`;
+  return `${forwardedFor}:${normalizedUsername || "invalid"}`;
 }
 
 function getRetryAfterSeconds(key: string, now: number) {
@@ -142,9 +145,9 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as
     | LoginRequestBody
     | null;
-  const phone = readLoginString(body?.phone, 32);
-  const accessCode = readLoginString(body?.accessCode, 512);
-  const attemptKey = getLoginAttemptKey(request, phone);
+  const username = readLoginString(body?.username, 64);
+  const password = readLoginString(body?.password, 256);
+  const attemptKey = getLoginAttemptKey(request, username);
   const now = Date.now();
   const retryAfter = getRetryAfterSeconds(attemptKey, now);
 
@@ -164,12 +167,12 @@ export async function POST(request: Request) {
     );
   }
 
-  const admin = phone === null ? null : getAdminByPhone(phone);
+  const admin = username === null ? null : getAdminByUsername(username);
 
   if (
     admin === null ||
-    accessCode === null ||
-    !verifyAdminAccessCode(accessCode)
+    password === null ||
+    !verifyAdminPassword(admin, password)
   ) {
     recordFailedLogin(attemptKey, now);
 

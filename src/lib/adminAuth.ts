@@ -1,4 +1,4 @@
-const TOKEN_VERSION = 1;
+const TOKEN_VERSION = 2;
 const MAX_TOKEN_LENGTH = 2_048;
 const MAX_CLOCK_SKEW_SECONDS = 60;
 
@@ -19,6 +19,7 @@ export type AdminRole = "super-admin" | "admin";
 
 export type AdminIdentity = Readonly<{
   id: AdminId;
+  username: string;
   displayName: string;
   role: AdminRole;
   phoneE164: string;
@@ -41,41 +42,42 @@ type AdminSessionPayload = Readonly<{
 const ADMINS: readonly AdminIdentity[] = [
   {
     id: "abdallah-saad",
+    username: "01025272693",
     displayName: "Abdallah Saad",
     role: "super-admin",
     phoneE164: "+201025272693",
   },
   {
     id: "iwan-haitham",
+    username: "Iwan",
     displayName: "Iwan Haitham",
     role: "admin",
     phoneE164: "+201110112860",
   },
   {
     id: "layal",
+    username: "Layal",
     displayName: "Layal",
     role: "admin",
     phoneE164: "+201060804017",
   },
 ] as const;
 
+const ADMIN_PASSWORD_ENV_BY_ID: Readonly<Record<AdminId, string>> = {
+  "abdallah-saad": "ADMIN_PASSWORD_ABDALLAH",
+  "iwan-haitham": "ADMIN_PASSWORD_IWAN",
+  layal: "ADMIN_PASSWORD_LAYAL",
+};
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
-function getAdminAccessCode(): string | null {
-  return (
-    process.env.ADMIN_ACCESS_CODE?.trim() ||
-    process.env.ADMIN_SECRET_KEY?.trim() ||
-    null
-  );
+function getAdminSessionSecret(): string | null {
+  return process.env.ADMIN_SESSION_SECRET?.trim() || null;
 }
 
-function getAdminSessionSecret(): string | null {
-  return (
-    process.env.ADMIN_SESSION_SECRET?.trim() ||
-    process.env.ADMIN_SECRET_KEY?.trim() ||
-    null
-  );
+function getAdminPassword(adminId: AdminId): string | null {
+  return process.env[ADMIN_PASSWORD_ENV_BY_ID[adminId]]?.trim() || null;
 }
 
 function safeStringEqual(left: string, right: string): boolean {
@@ -281,6 +283,38 @@ export function normalizeEgyptianAdminPhone(phone: string): string {
   return digits.replace(/^0+/u, "");
 }
 
+export function normalizeAdminUsername(username: string): string {
+  const normalized = username.normalize("NFKC").trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (/^[+\d\s()-]+$/u.test(normalized)) {
+    const phone = normalizeEgyptianAdminPhone(normalized);
+    return phone ? `phone:${phone}` : "";
+  }
+
+  return `name:${normalized
+    .toLocaleLowerCase("en-US")
+    .replace(/\s+/gu, " ")}`;
+}
+
+export function getAdminByUsername(username: string): AdminIdentity | null {
+  const normalizedUsername = normalizeAdminUsername(username);
+
+  if (!normalizedUsername) {
+    return null;
+  }
+
+  return (
+    ADMINS.find(
+      (admin) =>
+        normalizeAdminUsername(admin.username) === normalizedUsername,
+    ) ?? null
+  );
+}
+
 export function getAdminByPhone(phone: string): AdminIdentity | null {
   const normalizedPhone = normalizeEgyptianAdminPhone(phone);
 
@@ -301,13 +335,26 @@ export function getAdminById(id: string): AdminIdentity | null {
 }
 
 export function isAdminAuthConfigured(): boolean {
-  return getAdminAccessCode() !== null && getAdminSessionSecret() !== null;
+  return (
+    getAdminSessionSecret() !== null &&
+    ADMINS.every((admin) => getAdminPassword(admin.id) !== null)
+  );
 }
 
-export function verifyAdminAccessCode(candidate: string): boolean {
-  const expectedCode = getAdminAccessCode();
+export function verifyAdminPassword(
+  admin: AdminIdentity,
+  candidate: string,
+): boolean {
+  const configuredAdmin = getAdminById(admin.id);
+  const expectedPassword =
+    configuredAdmin === null ? null : getAdminPassword(configuredAdmin.id);
 
-  return expectedCode !== null && safeStringEqual(candidate, expectedCode);
+  return (
+    configuredAdmin !== null &&
+    configuredAdmin.phoneE164 === admin.phoneE164 &&
+    expectedPassword !== null &&
+    safeStringEqual(candidate, expectedPassword)
+  );
 }
 
 export async function createAdminSessionToken(
