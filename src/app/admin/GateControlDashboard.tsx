@@ -122,19 +122,8 @@ const SCANNER_ID = "glowrunners-gate-scanner";
 const SESSION_STORAGE_KEY = "glowrunners.admin.identity.v1";
 const OFFLINE_QUEUE_KEY = "glowrunners.admin.offline-checkins.v1";
 const WALK_INS_KEY = "glowrunners.admin.walk-ins.v1";
-const ENTRY_FEE_EGP = readPublicInteger(
-  process.env.NEXT_PUBLIC_GATE_ENTRY_FEE_EGP,
-  70,
-);
-const WALK_IN_FEE_EGP = readPublicInteger(
-  process.env.NEXT_PUBLIC_WALK_IN_FEE_EGP,
-  250,
-);
-const EVENT_KICKOFF =
-  process.env.NEXT_PUBLIC_EVENT_KICKOFF?.trim().slice(0, 40) || "8:00 AM";
-const EVENT_LOCATION =
-  process.env.NEXT_PUBLIC_EVENT_LOCATION?.trim().slice(0, 80) ||
-  "Alexandria Bibliotheca";
+const ENTRY_FEE_EGP = 70;
+const WALK_IN_FEE_EGP = ENTRY_FEE_EGP;
 
 const moneyFormatter = new Intl.NumberFormat("en-EG", {
   maximumFractionDigits: 0,
@@ -144,11 +133,6 @@ const localTimeFormatter = new Intl.DateTimeFormat("en-EG", {
   timeStyle: "short",
   timeZone: "Africa/Cairo",
 });
-
-function readPublicInteger(value: unknown, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -329,8 +313,8 @@ function parseWalkIn(value: unknown): WalkIn | null {
     name: value.name.trim().slice(0, 100),
     phone: normalizePhone(value.phone),
     paymentMethod: value.paymentMethod === "InstaPay" ? "InstaPay" : "Cash",
-    amountReceived: Math.max(0, Number(value.amountReceived) || 0),
-    changeOwed: Math.max(0, Number(value.changeOwed) || 0),
+    amountReceived: WALK_IN_FEE_EGP,
+    changeOwed: 0,
     createdAt:
       typeof value.createdAt === "string"
         ? value.createdAt
@@ -354,23 +338,56 @@ function ordinal(day: number): string {
   }`;
 }
 
-function eventDateLabels() {
+function eventDateLabels(sheetName: string) {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "Africa/Cairo",
-    weekday: "long",
-    month: "long",
+    year: "numeric",
+    month: "numeric",
     day: "numeric",
   });
   const parts = formatter.formatToParts(new Date());
-  const weekday =
-    parts.find((part) => part.type === "weekday")?.value || "Friday";
-  const month = parts.find((part) => part.type === "month")?.value || "July";
-  const day = Number(parts.find((part) => part.type === "day")?.value || 31);
+  const year = Number(parts.find((part) => part.type === "year")?.value);
+  const monthIndex =
+    Number(parts.find((part) => part.type === "month")?.value) - 1;
+  const localDay = Number(parts.find((part) => part.type === "day")?.value);
+  const localNoonUtc = new Date(Date.UTC(year, monthIndex, localDay, 12));
+  const localWeekday = localNoonUtc.getUTCDay();
+  const daysUntilTuesday = (2 - localWeekday + 7) % 7;
+  const daysUntilFriday = (5 - localWeekday + 7) % 7;
+  const eventDate = new Date(localNoonUtc);
+
+  eventDate.setUTCDate(
+    localNoonUtc.getUTCDate() + Math.min(daysUntilTuesday, daysUntilFriday),
+  );
+
+  const sheetMatch = sheetName.match(
+    /^attendance\s*-\s*(tuesday|friday)\s*-\s*(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([a-z]+)\s*$/i,
+  );
+  const fallbackWeekday = eventDate.toLocaleString("en-US", {
+    weekday: "long",
+    timeZone: "UTC",
+  });
+  const weekday = sheetMatch
+    ? `${sheetMatch[1][0].toUpperCase()}${sheetMatch[1].slice(1).toLowerCase()}`
+    : fallbackWeekday;
+  const month = sheetMatch
+    ? `${sheetMatch[3][0].toUpperCase()}${sheetMatch[3].slice(1).toLowerCase()}`
+    : eventDate.toLocaleString("en-US", {
+        month: "long",
+        timeZone: "UTC",
+      });
+  const day = sheetMatch ? Number(sheetMatch[2]) : eventDate.getUTCDate();
+  const isTuesday = weekday === "Tuesday";
+  const ordinalSuffix = ordinal(day)
+    .slice(String(day).length)
+    .toLocaleLowerCase("en-US");
 
   return {
     badge: `${weekday.slice(0, 3).toUpperCase()} - ${ordinal(day)} OF ${month.toUpperCase()}`,
     day: weekday,
-    report: `${weekday} ${day}${ordinal(day).replace(String(day), "").toLocaleLowerCase("en-US")} ${month}`,
+    kickoff: isTuesday ? "6:00 AM" : "8:00 AM",
+    location: isTuesday ? "Stanley bridge" : "Kafr abdo",
+    report: `${weekday} ${day}${ordinalSuffix} ${month}`,
   };
 }
 
@@ -439,7 +456,10 @@ export function GateControlDashboard() {
     value: "",
     at: 0,
   });
-  const dateLabels = useMemo(eventDateLabels, []);
+  const dateLabels = useMemo(
+    () => eventDateLabels(dashboard.sheetName),
+    [dashboard.sheetName],
+  );
 
   const handleUnauthorized = useCallback((response: Response) => {
     if (response.status !== 401 && response.status !== 403) {
@@ -1289,7 +1309,7 @@ export function GateControlDashboard() {
         body: JSON.stringify({
           actionType: "WALK_IN_ADDED",
           operationId: `walk-in:${item.id}`,
-          description: `${activeAdmin?.displayName ?? "Admin"} added walk-in Runner: ${name}`,
+          description: `${activeAdmin?.displayName ?? "Admin"} added walk-in Runner: ${name} (${walkInMethod}, ${money(WALK_IN_FEE_EGP)})`,
         }),
       });
       const payload = await readJson(response);
@@ -1513,8 +1533,8 @@ export function GateControlDashboard() {
           className="grid min-w-0 grid-cols-3 gap-2"
         >
           {[
-            ["KICKOFF", EVENT_KICKOFF],
-            ["LOCATION", EVENT_LOCATION],
+            ["KICKOFF", dateLabels.kickoff],
+            ["LOCATION", dateLabels.location],
             ["DAY", dateLabels.day],
           ].map(([label, value]) => (
             <div

@@ -652,10 +652,13 @@ export function getActiveAttendanceSheetName(
 ): string {
   const { year, month, day } = getLocalDateParts(date, timeZone);
   const localNoonUtc = new Date(Date.UTC(year, month - 1, day, 12));
-  const daysUntilFriday = (5 - localNoonUtc.getUTCDay() + 7) % 7;
+  const localWeekday = localNoonUtc.getUTCDay();
+  const daysUntilTuesday = (2 - localWeekday + 7) % 7;
+  const daysUntilFriday = (5 - localWeekday + 7) % 7;
+  const daysUntilMeetup = Math.min(daysUntilTuesday, daysUntilFriday);
   const meetupDate = new Date(localNoonUtc);
 
-  meetupDate.setUTCDate(localNoonUtc.getUTCDate() + daysUntilFriday);
+  meetupDate.setUTCDate(localNoonUtc.getUTCDate() + daysUntilMeetup);
 
   const meetupDay = meetupDate.getUTCDate();
   const meetupMonth = meetupDate.toLocaleString("en-US", {
@@ -670,6 +673,59 @@ export function getActiveAttendanceSheetName(
   return `Attendance - ${meetupWeekday} - ${ordinal(
     meetupDay,
   )} of ${meetupMonth}`;
+}
+
+const ATTENDANCE_SHEET_PATTERN =
+  /^attendance\s*-\s*(tuesday|friday)\s*-\s*(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([a-z]+)\s*$/i;
+const MONTH_INDEX_BY_NAME = new Map(
+  Array.from({ length: 12 }, (_, monthIndex) => [
+    new Date(Date.UTC(2024, monthIndex, 1))
+      .toLocaleString("en-US", { month: "long", timeZone: "UTC" })
+      .toLocaleLowerCase("en-US"),
+    monthIndex,
+  ]),
+);
+
+function parseAttendanceSheetDate(
+  sheetName: string,
+  referenceDate: Date,
+): Date | null {
+  const match = sheetName.trim().match(ATTENDANCE_SHEET_PATTERN);
+
+  if (!match) {
+    return null;
+  }
+
+  const weekday = match[1].toLocaleLowerCase("en-US");
+  const day = Number(match[2]);
+  const monthIndex = MONTH_INDEX_BY_NAME.get(
+    match[3].toLocaleLowerCase("en-US"),
+  );
+
+  if (monthIndex === undefined) {
+    return null;
+  }
+
+  const expectedWeekday = weekday === "tuesday" ? 2 : 5;
+  const candidates = [-1, 0, 1].flatMap((yearOffset) => {
+    const candidate = new Date(
+      Date.UTC(referenceDate.getUTCFullYear() + yearOffset, monthIndex, day, 12),
+    );
+
+    return candidate.getUTCMonth() === monthIndex &&
+      candidate.getUTCDate() === day &&
+      candidate.getUTCDay() === expectedWeekday
+      ? [candidate]
+      : [];
+  });
+
+  return (
+    candidates.sort(
+      (left, right) =>
+        Math.abs(left.getTime() - referenceDate.getTime()) -
+        Math.abs(right.getTime() - referenceDate.getTime()),
+    )[0] ?? null
+  );
 }
 
 export async function resolveActiveAttendanceSheetName(): Promise<{
@@ -711,14 +767,37 @@ export async function resolveActiveAttendanceSheetName(): Promise<{
     return { sheetName: configuredSheetName, isFallback: false };
   }
 
+  const localParts = getLocalDateParts(new Date(), DEFAULT_TIME_ZONE);
+  const localToday = new Date(
+    Date.UTC(localParts.year, localParts.month - 1, localParts.day, 12),
+  );
+  const nearestCycleSheet = availableSheets
+    .flatMap((sheet) => {
+      const eventDate = parseAttendanceSheetDate(sheet.title, localToday);
+
+      return eventDate ? [{ sheet, eventDate }] : [];
+    })
+    .sort((left, right) => {
+      const leftDelta = left.eventDate.getTime() - localToday.getTime();
+      const rightDelta = right.eventDate.getTime() - localToday.getTime();
+      const leftIsPast = leftDelta < 0 ? 1 : 0;
+      const rightIsPast = rightDelta < 0 ? 1 : 0;
+
+      return (
+        leftIsPast - rightIsPast ||
+        Math.abs(leftDelta) - Math.abs(rightDelta) ||
+        (right.sheet.index ?? 0) - (left.sheet.index ?? 0)
+      );
+    })[0]?.sheet;
   const latestAttendanceSheet = [...availableSheets]
     .reverse()
     .find((sheet) =>
       normalizeSheetHeader(sheet.title).startsWith("attendance "),
     );
+  const fallbackSheet = nearestCycleSheet ?? latestAttendanceSheet;
 
-  return latestAttendanceSheet
-    ? { sheetName: latestAttendanceSheet.title, isFallback: true }
+  return fallbackSheet
+    ? { sheetName: fallbackSheet.title, isFallback: true }
     : { sheetName: desiredSheetName, isFallback: false };
 }
 
