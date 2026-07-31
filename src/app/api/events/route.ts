@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAdminSessionFromRequest } from "@/lib/adminAuth";
+import { recordAdminActivity } from "@/lib/adminOperations";
 import {
   forbiddenPostRunResponse,
   isApiObject,
@@ -82,6 +83,12 @@ export async function POST(request: Request) {
     const event = await createPostRunEvent(
       input,
       session.admin.phoneE164,
+    );
+    await recordAdminActivity(
+      session.admin,
+      "POST_RUN_EVENT_CREATED",
+      `${session.admin.displayName} created post-run event: ${event.title}`,
+      `post-run-event:${event.id}`,
     );
 
     return NextResponse.json(

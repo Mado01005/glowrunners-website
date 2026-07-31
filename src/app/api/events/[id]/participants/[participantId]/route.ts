@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAdminSessionFromRequest } from "@/lib/adminAuth";
+import { recordAdminActivity } from "@/lib/adminOperations";
 import {
   forbiddenPostRunResponse,
   isApiObject,
@@ -95,6 +96,21 @@ export async function PATCH(
       participantId,
       patch,
       session.admin.phoneE164,
+    );
+    const action =
+      participant.settlementStatus === "Fully Cleared" &&
+      patch.settlementStatus === "Fully Cleared"
+        ? "POST_RUN_BALANCE_CLEARED"
+        : "POST_RUN_PARTICIPANT_UPDATED";
+    const description =
+      action === "POST_RUN_BALANCE_CLEARED"
+        ? `${session.admin.displayName} cleared the remaining balance for ${participant.name}`
+        : `${session.admin.displayName} updated post-run payment details for ${participant.name}`;
+    await recordAdminActivity(
+      session.admin,
+      action,
+      description,
+      `post-run-update:${participant.id}:${participant.updatedAt}`,
     );
 
     return NextResponse.json(

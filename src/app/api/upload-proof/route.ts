@@ -1,6 +1,7 @@
 import { del, put } from "@vercel/blob";
 import { NextResponse } from "next/server";
 import { getAdminSessionFromRequest } from "@/lib/adminAuth";
+import { recordAdminActivity } from "@/lib/adminOperations";
 import { GoogleSheetsMutationOutcomeUnknownError } from "@/lib/googleSheets";
 import {
   postRunErrorResponse,
@@ -179,6 +180,12 @@ export async function POST(request: Request) {
       participantId,
       { paymentScreenshotUrl: storedProofUrl },
       session.admin.phoneE164,
+    );
+    await recordAdminActivity(
+      session.admin,
+      "PAYMENT_PROOF_UPLOADED",
+      `${session.admin.displayName} uploaded payment proof for ${updatedParticipant.name}`,
+      `proof-upload:${participantId}:${updatedParticipant.updatedAt}`,
     );
 
     if (

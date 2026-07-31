@@ -42,6 +42,9 @@ let sheetsClientPromise: Promise<sheets_v4.Sheets> | undefined;
 export type RunnerLookupResult = {
   rowIndex: number;
   fullName: string;
+  phone: string;
+  paymentType: string;
+  status: string;
 };
 
 export type AttendanceRosterEntry = {
@@ -722,6 +725,7 @@ export async function resolveActiveAttendanceSheetName(): Promise<{
 export async function findRunnerByPhone(
   sheetName: string,
   scannedPhone: string,
+  preferredRowIndex?: number,
 ): Promise<RunnerLookupResult | null> {
   const normalizedScannedPhone = normalizeEgyptianMobilePhone(scannedPhone);
 
@@ -731,6 +735,8 @@ export async function findRunnerByPhone(
 
   const { rows, columns } = await getAttendanceValues(sheetName);
   const startIndex = columns.hasHeaderRow ? 1 : 0;
+
+  let firstMatch: RunnerLookupResult | null = null;
 
   for (let index = startIndex; index < rows.length; index += 1) {
     const row = rows[index];
@@ -742,14 +748,25 @@ export async function findRunnerByPhone(
       sheetPhone &&
       normalizeEgyptianMobilePhone(sheetPhone) === normalizedScannedPhone
     ) {
-      return {
+      const match: RunnerLookupResult = {
         rowIndex: index + 1,
         fullName,
+        phone: normalizedScannedPhone,
+        paymentType:
+          String(row[columns.paymentType] ?? "").trim().slice(0, 40) ||
+          "Unknown",
+        status: String(row[columns.status] ?? "").trim().slice(0, 40),
       };
+
+      if (preferredRowIndex === match.rowIndex) {
+        return match;
+      }
+
+      firstMatch ??= match;
     }
   }
 
-  return null;
+  return firstMatch;
 }
 
 export async function getAttendanceRoster(
