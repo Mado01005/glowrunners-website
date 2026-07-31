@@ -37,6 +37,8 @@ export type PostRunEvent = Readonly<{
   createdAt: string;
   updatedAt: string;
   createdByAdminPhone: string;
+  archivedAt: string | null;
+  archivedByAdminPhone: string | null;
 }>;
 
 export type PostRunEventInput = Readonly<{
@@ -47,6 +49,10 @@ export type PostRunEventInput = Readonly<{
   maxCapacity: number | null;
   paymentInstructions: string;
 }>;
+
+export type PostRunEventPatch = Readonly<
+  Partial<PostRunEventInput>
+>;
 
 export type PostRunParticipant = Readonly<{
   id: string;
@@ -62,6 +68,9 @@ export type PostRunParticipant = Readonly<{
   updatedAt: string;
   createdByAdminPhone: string;
   updatedByAdminPhone: string;
+  internalNotes: string;
+  deletedAt: string | null;
+  deletedByAdminPhone: string | null;
 }>;
 
 export type PostRunParticipantInput = Readonly<{
@@ -71,6 +80,7 @@ export type PostRunParticipantInput = Readonly<{
   depositAmountPaidEgp?: number;
   paymentScreenshotUrl?: string | null;
   settlementStatus?: PostRunSettlementStatus;
+  internalNotes?: string;
 }>;
 
 export type PostRunParticipantPatch = Readonly<{
@@ -78,6 +88,9 @@ export type PostRunParticipantPatch = Readonly<{
   depositAmountPaidEgp?: number;
   paymentScreenshotUrl?: string | null;
   settlementStatus?: PostRunSettlementStatus;
+  internalNotes?: string;
+  deletedAt?: string | null;
+  deletedByAdminPhone?: string | null;
 }>;
 
 export type PostRunEventsErrorCode =
@@ -107,7 +120,9 @@ type EventColumn =
   | "paymentInstructions"
   | "createdAt"
   | "updatedAt"
-  | "createdByAdminPhone";
+  | "createdByAdminPhone"
+  | "archivedAt"
+  | "archivedByAdminPhone";
 
 type ParticipantColumn =
   | "id"
@@ -122,7 +137,10 @@ type ParticipantColumn =
   | "createdAt"
   | "updatedAt"
   | "createdByAdminPhone"
-  | "updatedByAdminPhone";
+  | "updatedByAdminPhone"
+  | "internalNotes"
+  | "deletedAt"
+  | "deletedByAdminPhone";
 
 type ParticipantUpdateColumn =
   | "id"
@@ -238,6 +256,16 @@ const EVENT_HEADER_DEFINITIONS: readonly HeaderDefinition<EventColumn>[] = [
       "admin phone",
     ],
   },
+  {
+    key: "archivedAt",
+    header: "Archived At",
+    aliases: ["archived at", "archive timestamp"],
+  },
+  {
+    key: "archivedByAdminPhone",
+    header: "Archived By Admin Phone",
+    aliases: ["archived by admin phone", "archived by", "archive admin phone"],
+  },
 ];
 
 const PARTICIPANT_HEADER_DEFINITIONS: readonly HeaderDefinition<ParticipantColumn>[] =
@@ -336,6 +364,21 @@ const PARTICIPANT_HEADER_DEFINITIONS: readonly HeaderDefinition<ParticipantColum
         "updated by",
       ],
     },
+    {
+      key: "internalNotes",
+      header: "Internal Notes",
+      aliases: ["internal notes", "admin notes", "notes"],
+    },
+    {
+      key: "deletedAt",
+      header: "Deleted At",
+      aliases: ["deleted at", "removed at"],
+    },
+    {
+      key: "deletedByAdminPhone",
+      header: "Deleted By Admin Phone",
+      aliases: ["deleted by admin phone", "deleted by", "removed by"],
+    },
   ];
 
 const PARTICIPANT_UPDATE_HEADER_DEFINITIONS: readonly HeaderDefinition<ParticipantUpdateColumn>[] =
@@ -375,6 +418,7 @@ const PARTICIPANT_UPDATE_HEADER_DEFINITIONS: readonly HeaderDefinition<Participa
 const MAX_TITLE_LENGTH = 120;
 const MAX_NAME_LENGTH = 120;
 const MAX_PAYMENT_INSTRUCTIONS_LENGTH = 2_000;
+const MAX_INTERNAL_NOTES_LENGTH = 2_000;
 // Google Sheets cells accept up to 50,000 characters. Keep the inline fallback
 // below that boundary while still accepting normal Blob URLs.
 const MAX_SCREENSHOT_URL_LENGTH = 45_000;
@@ -434,6 +478,30 @@ function requireStoredText(
       `${fieldName} is missing or invalid in sheet row ${rowIndex}.`,
     );
   }
+}
+
+function normalizeInternalNotes(
+  value: unknown,
+  errorKind: "CONFIGURATION" | "VALIDATION" = "VALIDATION",
+): string {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+
+  if (typeof value !== "string") {
+    throw new PostRunEventsError(errorKind, "Internal notes must be text.");
+  }
+
+  const normalized = value.trim();
+
+  if (normalized.length > MAX_INTERNAL_NOTES_LENGTH) {
+    throw new PostRunEventsError(
+      errorKind,
+      `Internal notes must be ${MAX_INTERNAL_NOTES_LENGTH} characters or fewer.`,
+    );
+  }
+
+  return normalized;
 }
 
 function normalizeMoney(
@@ -537,6 +605,33 @@ function requireTimestamp(
   return timestamp;
 }
 
+function optionalTimestamp(
+  value: unknown,
+  fieldName: string,
+  rowIndex: number,
+): string | null {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+
+  return requireTimestamp(value, fieldName, rowIndex);
+}
+
+function normalizeOptionalMutationTimestamp(
+  value: unknown,
+  fieldName: string,
+): string | null {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw validationError(`${fieldName} must be a valid timestamp.`);
+  }
+
+  return value;
+}
+
 function requireCanonicalPhone(
   value: unknown,
   fieldName: string,
@@ -553,6 +648,24 @@ function requireCanonicalPhone(
   }
 
   return phone;
+}
+
+function optionalCanonicalPhone(
+  value: unknown,
+  fieldName: string,
+  rowIndex: number,
+): string | null {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+
+  try {
+    return requireCanonicalPhone(value, fieldName, "CONFIGURATION");
+  } catch {
+    throw configurationError(
+      `${fieldName} is invalid in sheet row ${rowIndex}.`,
+    );
+  }
 }
 
 function normalizeDepositStatus(
@@ -666,28 +779,41 @@ function normalizeStoredScreenshotUrl(
   }
 }
 
-function computeRemainingBalance(
+export function computePostRunRemainingBalance(
   totalCostPerPersonEgp: number,
   depositAmountPaidEgp: number,
-  settlementStatus: PostRunSettlementStatus,
 ): number {
-  if (
-    settlementStatus === "Fully Cleared" ||
-    depositAmountPaidEgp >= totalCostPerPersonEgp
-  ) {
-    return 0;
-  }
-
-  return (
-    Math.round((totalCostPerPersonEgp - depositAmountPaidEgp) * 100) / 100
+  return Math.max(
+    0,
+    Math.round((totalCostPerPersonEgp - depositAmountPaidEgp) * 100) / 100,
   );
 }
 
-function finalSettlementStatus(
-  requestedStatus: PostRunSettlementStatus,
-  remainingBalanceEgp: number,
-): PostRunSettlementStatus {
-  return remainingBalanceEgp === 0 ? "Fully Cleared" : requestedStatus;
+export function derivePostRunPaymentStatuses(
+  amountPaidEgp: number,
+  eventTicketPriceEgp: number,
+): {
+  depositStatus: PostRunDepositStatus;
+  settlementStatus: PostRunSettlementStatus;
+} {
+  if (amountPaidEgp <= 0) {
+    return {
+      depositStatus: "Pending",
+      settlementStatus: "Unpaid",
+    };
+  }
+
+  if (amountPaidEgp >= eventTicketPriceEgp) {
+    return {
+      depositStatus: "Verified",
+      settlementStatus: "Fully Cleared",
+    };
+  }
+
+  return {
+    depositStatus: "Verified",
+    settlementStatus: "Unpaid",
+  };
 }
 
 function getCell<Key extends string>(
@@ -918,10 +1044,14 @@ async function getPostRunSheetColumns(): Promise<PostRunSheetColumns> {
 function eventToRow(
   event: PostRunEvent,
   columns: ColumnMap<EventColumn>,
+  existingRow: readonly unknown[] = [],
 ): unknown[] {
-  const row: unknown[] = Array(
-    Math.max(...Object.values(columns)) + 1,
-  ).fill("");
+  const row = [...existingRow];
+  const requiredLength = Math.max(...Object.values(columns)) + 1;
+
+  while (row.length < requiredLength) {
+    row.push("");
+  }
 
   row[columns.id] = event.id;
   row[columns.title] = event.title;
@@ -934,6 +1064,8 @@ function eventToRow(
   row[columns.createdAt] = event.createdAt;
   row[columns.updatedAt] = event.updatedAt;
   row[columns.createdByAdminPhone] = event.createdByAdminPhone;
+  row[columns.archivedAt] = event.archivedAt ?? "";
+  row[columns.archivedByAdminPhone] = event.archivedByAdminPhone ?? "";
 
   return row;
 }
@@ -963,6 +1095,9 @@ function participantToRow(
   row[columns.updatedAt] = participant.updatedAt;
   row[columns.createdByAdminPhone] = participant.createdByAdminPhone;
   row[columns.updatedByAdminPhone] = participant.updatedByAdminPhone;
+  row[columns.internalNotes] = participant.internalNotes;
+  row[columns.deletedAt] = participant.deletedAt ?? "";
+  row[columns.deletedByAdminPhone] = participant.deletedByAdminPhone ?? "";
 
   return row;
 }
@@ -1052,6 +1187,16 @@ function parseEventRow(
       "Created by admin phone",
       "CONFIGURATION",
     ),
+    archivedAt: optionalTimestamp(
+      getCell(row, columns, "archivedAt"),
+      "Archived at",
+      rowIndex,
+    ),
+    archivedByAdminPhone: optionalCanonicalPhone(
+      getCell(row, columns, "archivedByAdminPhone"),
+      "Archived by admin phone",
+      rowIndex,
+    ),
   };
 }
 
@@ -1067,24 +1212,22 @@ function parseParticipantRow(
     "CONFIGURATION",
   );
 
-  if (depositAmountPaidEgp > event.totalCostPerPersonEgp) {
-    throw configurationError(
-      `Deposit exceeds the event cost in ${POST_RUN_PARTICIPANTS_SHEET_NAME} row ${rowIndex}.`,
-    );
-  }
-
   const requestedSettlementStatus = normalizeSettlementStatus(
     getCell(row, columns, "settlementStatus"),
     "CONFIGURATION",
   );
-  const remainingBalanceEgp = computeRemainingBalance(
+  const effectiveAmountPaidEgp =
+    requestedSettlementStatus === "Fully Cleared" &&
+    depositAmountPaidEgp < event.totalCostPerPersonEgp
+      ? event.totalCostPerPersonEgp
+      : depositAmountPaidEgp;
+  const remainingBalanceEgp = computePostRunRemainingBalance(
     event.totalCostPerPersonEgp,
-    depositAmountPaidEgp,
-    requestedSettlementStatus,
+    effectiveAmountPaidEgp,
   );
-  const settlementStatus = finalSettlementStatus(
-    requestedSettlementStatus,
-    remainingBalanceEgp,
+  const { depositStatus, settlementStatus } = derivePostRunPaymentStatuses(
+    effectiveAmountPaidEgp,
+    event.totalCostPerPersonEgp,
   );
   const storedRemainingBalance = normalizeMoney(
     getCell(row, columns, "remainingBalanceEgp"),
@@ -1129,11 +1272,8 @@ function parseParticipantRow(
       "WhatsApp phone",
       "CONFIGURATION",
     ),
-    depositStatus: normalizeDepositStatus(
-      getCell(row, columns, "depositStatus"),
-      "CONFIGURATION",
-    ),
-    depositAmountPaidEgp,
+    depositStatus,
+    depositAmountPaidEgp: effectiveAmountPaidEgp,
     paymentScreenshotUrl: normalizeStoredScreenshotUrl(
       getCell(row, columns, "paymentScreenshotUrl"),
       rowIndex,
@@ -1160,6 +1300,20 @@ function parseParticipantRow(
       "Updated by admin phone",
       "CONFIGURATION",
     ),
+    internalNotes: normalizeInternalNotes(
+      getCell(row, columns, "internalNotes"),
+      "CONFIGURATION",
+    ),
+    deletedAt: optionalTimestamp(
+      getCell(row, columns, "deletedAt"),
+      "Deleted at",
+      rowIndex,
+    ),
+    deletedByAdminPhone: optionalCanonicalPhone(
+      getCell(row, columns, "deletedByAdminPhone"),
+      "Deleted by admin phone",
+      rowIndex,
+    ),
   };
 }
 
@@ -1167,7 +1321,6 @@ function parseParticipantUpdateRow(
   row: readonly unknown[],
   rowIndex: number,
   columns: ColumnMap<ParticipantUpdateColumn>,
-  event: PostRunEvent,
 ): ParticipantUpdate {
   const serializedPatch = requireStoredText(
     getCell(row, columns, "patchJson"),
@@ -1196,6 +1349,9 @@ function parseParticipantUpdateRow(
     "depositAmountPaidEgp",
     "paymentScreenshotUrl",
     "settlementStatus",
+    "internalNotes",
+    "deletedAt",
+    "deletedByAdminPhone",
   ]);
   const unknownKey = Object.keys(rawPatch).find((key) => !allowedKeys.has(key));
 
@@ -1210,6 +1366,9 @@ function parseParticipantUpdateRow(
     depositAmountPaidEgp?: number;
     paymentScreenshotUrl?: string | null;
     settlementStatus?: PostRunSettlementStatus;
+    internalNotes?: string;
+    deletedAt?: string | null;
+    deletedByAdminPhone?: string | null;
   } = {};
 
   if (Object.prototype.hasOwnProperty.call(rawPatch, "depositStatus")) {
@@ -1225,7 +1384,6 @@ function parseParticipantUpdateRow(
       "Deposit amount paid",
       "CONFIGURATION",
     );
-    assertParticipantAmount(patch.depositAmountPaidEgp, event);
   }
 
   if (Object.prototype.hasOwnProperty.call(rawPatch, "paymentScreenshotUrl")) {
@@ -1239,6 +1397,29 @@ function parseParticipantUpdateRow(
     patch.settlementStatus = normalizeSettlementStatus(
       rawPatch.settlementStatus,
       "CONFIGURATION",
+    );
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "internalNotes")) {
+    patch.internalNotes = normalizeInternalNotes(
+      rawPatch.internalNotes,
+      "CONFIGURATION",
+    );
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "deletedAt")) {
+    patch.deletedAt = optionalTimestamp(
+      rawPatch.deletedAt,
+      "Deleted at",
+      rowIndex,
+    );
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "deletedByAdminPhone")) {
+    patch.deletedByAdminPhone = optionalCanonicalPhone(
+      rawPatch.deletedByAdminPhone,
+      "Deleted by admin phone",
+      rowIndex,
     );
   }
 
@@ -1286,29 +1467,41 @@ function applyParticipantUpdate(
   update: ParticipantUpdate,
   event: PostRunEvent,
 ): PostRunParticipant {
-  const depositAmountPaidEgp =
+  const patchedAmountPaidEgp =
     update.patch.depositAmountPaidEgp ?? current.depositAmountPaidEgp;
-  const requestedSettlementStatus =
-    update.patch.settlementStatus ?? current.settlementStatus;
-  const remainingBalanceEgp = computeRemainingBalance(
+  const depositAmountPaidEgp =
+    update.patch.settlementStatus === "Fully Cleared" &&
+    update.patch.depositAmountPaidEgp === undefined
+      ? Math.max(patchedAmountPaidEgp, event.totalCostPerPersonEgp)
+      : patchedAmountPaidEgp;
+  const remainingBalanceEgp = computePostRunRemainingBalance(
     event.totalCostPerPersonEgp,
     depositAmountPaidEgp,
-    requestedSettlementStatus,
+  );
+  const { depositStatus, settlementStatus } = derivePostRunPaymentStatuses(
+    depositAmountPaidEgp,
+    event.totalCostPerPersonEgp,
   );
 
   return {
     ...current,
-    depositStatus: update.patch.depositStatus ?? current.depositStatus,
+    depositStatus,
     depositAmountPaidEgp,
     paymentScreenshotUrl:
       update.patch.paymentScreenshotUrl === undefined
         ? current.paymentScreenshotUrl
         : update.patch.paymentScreenshotUrl,
     remainingBalanceEgp,
-    settlementStatus: finalSettlementStatus(
-      requestedSettlementStatus,
-      remainingBalanceEgp,
-    ),
+    settlementStatus,
+    internalNotes: update.patch.internalNotes ?? current.internalNotes,
+    deletedAt:
+      update.patch.deletedAt === undefined
+        ? current.deletedAt
+        : update.patch.deletedAt,
+    deletedByAdminPhone:
+      update.patch.deletedByAdminPhone === undefined
+        ? current.deletedByAdminPhone
+        : update.patch.deletedByAdminPhone,
     updatedAt: update.createdAt,
     updatedByAdminPhone: update.updatedByAdminPhone,
   };
@@ -1365,7 +1558,7 @@ async function requireEvent(
   const events = await readEventRows(columns);
   const event = events.find((candidate) => candidate.value.id === normalizedEventId);
 
-  if (!event) {
+  if (!event || event.value.archivedAt !== null) {
     throw new PostRunEventsError(
       "NOT_FOUND",
       `Post-run event "${normalizedEventId}" was not found.`,
@@ -1456,7 +1649,7 @@ async function readParticipantUpdates(
     }
 
     const rowIndex = index + 2;
-    const update = parseParticipantUpdateRow(row, rowIndex, columns, event);
+    const update = parseParticipantUpdateRow(row, rowIndex, columns);
 
     if (seenIds.has(update.id)) {
       throw configurationError(
@@ -1536,17 +1729,6 @@ async function withEventMutationLock<T>(
   }
 }
 
-function assertParticipantAmount(
-  depositAmountPaidEgp: number,
-  event: PostRunEvent,
-): void {
-  if (depositAmountPaidEgp > event.totalCostPerPersonEgp) {
-    throw validationError(
-      "Deposit amount paid cannot exceed the event total cost per person.",
-    );
-  }
-}
-
 function compareParticipantRows(
   left: ParticipantRow,
   right: ParticipantRow,
@@ -1597,7 +1779,9 @@ async function reconcileParticipantAddition(
       columns.participants,
       columns.participantUpdates,
     )
-  ).sort(compareParticipantRows);
+  )
+    .filter((row) => row.value.deletedAt === null)
+    .sort(compareParticipantRows);
   const uniquePhoneRows: ParticipantRow[] = [];
   const seenPhones = new Set<string>();
   const duplicateRows: ParticipantRow[] = [];
@@ -1653,6 +1837,7 @@ export async function listPostRunEvents(): Promise<PostRunEvent[]> {
 
   return rows
     .map((row) => row.value)
+    .filter((event) => event.archivedAt === null)
     .sort((left, right) => {
       return (
         left.associatedDate.localeCompare(right.associatedDate) ||
@@ -1712,6 +1897,8 @@ export async function createPostRunEvent(
     createdAt: now,
     updatedAt: now,
     createdByAdminPhone,
+    archivedAt: null,
+    archivedByAdminPhone: null,
   };
   const sheets = await getSheetsClient();
   const finalColumn = columnIndexToA1(
@@ -1741,6 +1928,229 @@ export async function createPostRunEvent(
   return event;
 }
 
+export async function updatePostRunEvent(
+  eventId: string,
+  patch: PostRunEventPatch,
+  adminPhone: string,
+): Promise<PostRunEvent> {
+  const normalizedEventId = requireBoundedText(
+    eventId,
+    "Event ID",
+    MAX_ID_LENGTH,
+  );
+
+  return withEventMutationLock(normalizedEventId, async () => {
+    if (!isObject(patch)) {
+      throw validationError("Event patch must be an object.");
+    }
+
+    const patchKeys: readonly (keyof PostRunEventPatch)[] = [
+      "title",
+      "associatedDate",
+      "totalCostPerPersonEgp",
+      "requiredDepositPerPersonEgp",
+      "maxCapacity",
+      "paymentInstructions",
+    ];
+    const unknownPatchKey = Object.keys(patch).find(
+      (key) => !patchKeys.includes(key as keyof PostRunEventPatch),
+    );
+
+    if (unknownPatchKey) {
+      throw validationError(
+        `Event patch field "${unknownPatchKey}" is not supported.`,
+      );
+    }
+
+    if (
+      !patchKeys.some((key) => Object.prototype.hasOwnProperty.call(patch, key))
+    ) {
+      throw validationError("Event patch does not contain any changes.");
+    }
+
+    const columns = await getPostRunSheetColumns();
+    const eventRows = await readEventRows(columns.events);
+    const currentRow = eventRows.find(
+      (candidate) =>
+        candidate.value.id === normalizedEventId &&
+        candidate.value.archivedAt === null,
+    );
+
+    if (!currentRow) {
+      throw new PostRunEventsError(
+        "NOT_FOUND",
+        `Post-run event "${normalizedEventId}" was not found.`,
+      );
+    }
+
+    const current = currentRow.value;
+    const totalCostPerPersonEgp = Object.prototype.hasOwnProperty.call(
+      patch,
+      "totalCostPerPersonEgp",
+    )
+      ? normalizeMoney(
+          patch.totalCostPerPersonEgp,
+          "Total cost per person",
+        )
+      : current.totalCostPerPersonEgp;
+    const requiredDepositPerPersonEgp = Object.prototype.hasOwnProperty.call(
+      patch,
+      "requiredDepositPerPersonEgp",
+    )
+      ? normalizeMoney(
+          patch.requiredDepositPerPersonEgp,
+          "Required deposit per person",
+        )
+      : current.requiredDepositPerPersonEgp;
+
+    if (requiredDepositPerPersonEgp > totalCostPerPersonEgp) {
+      throw validationError(
+        "Required deposit per person cannot exceed total cost per person.",
+      );
+    }
+
+    requireCanonicalPhone(adminPhone, "Admin phone");
+    const updated: PostRunEvent = {
+      ...current,
+      title: Object.prototype.hasOwnProperty.call(patch, "title")
+        ? requireBoundedText(patch.title, "Event title", MAX_TITLE_LENGTH)
+        : current.title,
+      associatedDate: Object.prototype.hasOwnProperty.call(
+        patch,
+        "associatedDate",
+      )
+        ? requireIsoDate(patch.associatedDate, "Associated date")
+        : current.associatedDate,
+      totalCostPerPersonEgp,
+      requiredDepositPerPersonEgp,
+      maxCapacity: Object.prototype.hasOwnProperty.call(patch, "maxCapacity")
+        ? requireCapacity(patch.maxCapacity)
+        : current.maxCapacity,
+      paymentInstructions: Object.prototype.hasOwnProperty.call(
+        patch,
+        "paymentInstructions",
+      )
+        ? requireBoundedText(
+            patch.paymentInstructions,
+            "Payment instructions",
+            MAX_PAYMENT_INSTRUCTIONS_LENGTH,
+          )
+        : current.paymentInstructions,
+      updatedAt: new Date().toISOString(),
+    };
+    const finalColumn = columnIndexToA1(
+      Math.max(
+        ...Object.values(columns.events),
+        currentRow.rawRow.length - 1,
+      ),
+    );
+    const range = `${quoteSheetName(POST_RUN_EVENTS_SHEET_NAME)}!A${
+      currentRow.rowIndex
+    }:${finalColumn}${currentRow.rowIndex}`;
+    const sheets = await getSheetsClient();
+
+    await withGoogleSheetsIdempotentMutationRetry(
+      `update post-run event ${updated.id}`,
+      () =>
+        sheets.spreadsheets.values.update({
+          spreadsheetId: GOOGLE_SPREADSHEET_ID,
+          range,
+          valueInputOption: "RAW",
+          requestBody: {
+            values: [
+              eventToRow(updated, columns.events, currentRow.rawRow),
+            ],
+          },
+        }),
+      async () => {
+        const refreshedRows = await readEventRows(columns.events);
+        return refreshedRows.some(
+          (candidate) =>
+            candidate.value.id === updated.id &&
+            candidate.value.updatedAt === updated.updatedAt,
+        );
+      },
+    );
+
+    return updated;
+  });
+}
+
+export async function archivePostRunEvent(
+  eventId: string,
+  adminPhone: string,
+): Promise<PostRunEvent> {
+  const normalizedEventId = requireBoundedText(
+    eventId,
+    "Event ID",
+    MAX_ID_LENGTH,
+  );
+
+  return withEventMutationLock(normalizedEventId, async () => {
+    const columns = await getPostRunSheetColumns();
+    const eventRows = await readEventRows(columns.events);
+    const currentRow = eventRows.find(
+      (candidate) =>
+        candidate.value.id === normalizedEventId &&
+        candidate.value.archivedAt === null,
+    );
+
+    if (!currentRow) {
+      throw new PostRunEventsError(
+        "NOT_FOUND",
+        `Post-run event "${normalizedEventId}" was not found.`,
+      );
+    }
+
+    const archivedByAdminPhone = requireCanonicalPhone(
+      adminPhone,
+      "Admin phone",
+    );
+    const now = new Date().toISOString();
+    const archived: PostRunEvent = {
+      ...currentRow.value,
+      updatedAt: now,
+      archivedAt: now,
+      archivedByAdminPhone,
+    };
+    const finalColumn = columnIndexToA1(
+      Math.max(
+        ...Object.values(columns.events),
+        currentRow.rawRow.length - 1,
+      ),
+    );
+    const range = `${quoteSheetName(POST_RUN_EVENTS_SHEET_NAME)}!A${
+      currentRow.rowIndex
+    }:${finalColumn}${currentRow.rowIndex}`;
+    const sheets = await getSheetsClient();
+
+    await withGoogleSheetsIdempotentMutationRetry(
+      `archive post-run event ${archived.id}`,
+      () =>
+        sheets.spreadsheets.values.update({
+          spreadsheetId: GOOGLE_SPREADSHEET_ID,
+          range,
+          valueInputOption: "RAW",
+          requestBody: {
+            values: [
+              eventToRow(archived, columns.events, currentRow.rawRow),
+            ],
+          },
+        }),
+      async () => {
+        const refreshedRows = await readEventRows(columns.events);
+        return refreshedRows.some(
+          (candidate) =>
+            candidate.value.id === archived.id &&
+            candidate.value.archivedAt === archived.archivedAt,
+        );
+      },
+    );
+
+    return archived;
+  });
+}
+
 export async function listEventParticipants(
   eventId: string,
 ): Promise<PostRunParticipant[]> {
@@ -1752,7 +2162,9 @@ export async function listEventParticipants(
     columns.participantUpdates,
   );
 
-  return participants.map((row) => row.value);
+  return participants
+    .map((row) => row.value)
+    .filter((participant) => participant.deletedAt === null);
 }
 
 export async function addEventParticipant(
@@ -1773,11 +2185,13 @@ export async function addEventParticipant(
 
     const columns = await getPostRunSheetColumns();
     const event = await requireEvent(normalizedEventId, columns.events);
-    const participants = await readParticipantRows(
-      event,
-      columns.participants,
-      columns.participantUpdates,
-    );
+    const participants = (
+      await readParticipantRows(
+        event,
+        columns.participants,
+        columns.participantUpdates,
+      )
+    ).filter((participant) => participant.value.deletedAt === null);
     const name = requireBoundedText(
       input.name,
       "Participant name",
@@ -1810,10 +2224,6 @@ export async function addEventParticipant(
       );
     }
 
-    const depositStatus =
-      input.depositStatus === undefined
-        ? "Pending"
-        : normalizeDepositStatus(input.depositStatus);
     const depositAmountPaidEgp =
       input.depositAmountPaidEgp === undefined
         ? 0
@@ -1821,20 +2231,13 @@ export async function addEventParticipant(
             input.depositAmountPaidEgp,
             "Deposit amount paid",
           );
-    assertParticipantAmount(depositAmountPaidEgp, event);
-
-    const requestedSettlementStatus =
-      input.settlementStatus === undefined
-        ? "Unpaid"
-        : normalizeSettlementStatus(input.settlementStatus);
-    const remainingBalanceEgp = computeRemainingBalance(
+    const remainingBalanceEgp = computePostRunRemainingBalance(
       event.totalCostPerPersonEgp,
       depositAmountPaidEgp,
-      requestedSettlementStatus,
     );
-    const settlementStatus = finalSettlementStatus(
-      requestedSettlementStatus,
-      remainingBalanceEgp,
+    const { depositStatus, settlementStatus } = derivePostRunPaymentStatuses(
+      depositAmountPaidEgp,
+      event.totalCostPerPersonEgp,
     );
     const paymentScreenshotUrl = normalizeScreenshotUrl(
       input.paymentScreenshotUrl,
@@ -1858,6 +2261,9 @@ export async function addEventParticipant(
       updatedAt: now,
       createdByAdminPhone: normalizedAdminPhone,
       updatedByAdminPhone: normalizedAdminPhone,
+      internalNotes: normalizeInternalNotes(input.internalNotes),
+      deletedAt: null,
+      deletedByAdminPhone: null,
     };
     const sheets = await getSheetsClient();
     const finalColumn = columnIndexToA1(
@@ -1915,6 +2321,9 @@ export async function updateEventParticipant(
       "depositAmountPaidEgp",
       "paymentScreenshotUrl",
       "settlementStatus",
+      "internalNotes",
+      "deletedAt",
+      "deletedByAdminPhone",
     ];
     const unknownPatchKey = Object.keys(patch).find(
       (key) => !patchKeys.includes(key as keyof PostRunParticipantPatch),
@@ -1952,11 +2361,21 @@ export async function updateEventParticipant(
       );
     }
 
+    if (currentRow.value.deletedAt !== null) {
+      throw new PostRunEventsError(
+        "NOT_FOUND",
+        `Participant "${normalizedParticipantId}" was already deleted.`,
+      );
+    }
+
     const normalizedPatch: {
       depositStatus?: PostRunDepositStatus;
       depositAmountPaidEgp?: number;
       paymentScreenshotUrl?: string | null;
       settlementStatus?: PostRunSettlementStatus;
+      internalNotes?: string;
+      deletedAt?: string | null;
+      deletedByAdminPhone?: string | null;
     } = {};
 
     if (Object.prototype.hasOwnProperty.call(patch, "depositStatus")) {
@@ -1970,7 +2389,6 @@ export async function updateEventParticipant(
         patch.depositAmountPaidEgp,
         "Deposit amount paid",
       );
-      assertParticipantAmount(normalizedPatch.depositAmountPaidEgp, event);
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, "paymentScreenshotUrl")) {
@@ -1983,6 +2401,29 @@ export async function updateEventParticipant(
       normalizedPatch.settlementStatus = normalizeSettlementStatus(
         patch.settlementStatus,
       );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "internalNotes")) {
+      normalizedPatch.internalNotes = normalizeInternalNotes(
+        patch.internalNotes,
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "deletedAt")) {
+      normalizedPatch.deletedAt = normalizeOptionalMutationTimestamp(
+        patch.deletedAt,
+        "Deleted at",
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "deletedByAdminPhone")) {
+      normalizedPatch.deletedByAdminPhone =
+        patch.deletedByAdminPhone === null
+          ? null
+          : requireCanonicalPhone(
+              patch.deletedByAdminPhone,
+              "Deleted by admin phone",
+            );
     }
 
     const updatedByAdminPhone = requireCanonicalPhone(
@@ -2047,4 +2488,25 @@ export async function updateEventParticipant(
 
     return refreshed.value;
   });
+}
+
+export async function deleteEventParticipant(
+  eventId: string,
+  participantId: string,
+  adminPhone: string,
+): Promise<PostRunParticipant> {
+  const deletedByAdminPhone = requireCanonicalPhone(
+    adminPhone,
+    "Admin phone",
+  );
+
+  return updateEventParticipant(
+    eventId,
+    participantId,
+    {
+      deletedAt: new Date().toISOString(),
+      deletedByAdminPhone,
+    },
+    deletedByAdminPhone,
+  );
 }

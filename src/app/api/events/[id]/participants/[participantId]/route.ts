@@ -10,6 +10,7 @@ import {
   toParticipantResponse,
 } from "@/lib/postRunApi";
 import {
+  deleteEventParticipant,
   updateEventParticipant,
   type PostRunParticipantPatch,
 } from "@/lib/postRunEvents";
@@ -50,6 +51,7 @@ export async function PATCH(
     depositAmountPaidEgp?: number;
     paymentScreenshotUrl?: string | null;
     settlementStatus?: PostRunParticipantPatch["settlementStatus"];
+    internalNotes?: string;
   } = {};
 
   if (hasOwn(body, "depositStatus") || hasOwn(body, "deposit_status")) {
@@ -62,9 +64,17 @@ export async function PATCH(
           : (value as PostRunParticipantPatch["depositStatus"]);
   }
 
-  if (hasOwn(body, "depositPaid") || hasOwn(body, "deposit_paid")) {
+  if (
+    hasOwn(body, "amountPaid") ||
+    hasOwn(body, "amount_paid") ||
+    hasOwn(body, "depositPaid") ||
+    hasOwn(body, "deposit_paid")
+  ) {
     patch.depositAmountPaidEgp = toFiniteNumber(
-      body.depositPaid ?? body.deposit_paid,
+      body.amountPaid ??
+        body.amount_paid ??
+        body.depositPaid ??
+        body.deposit_paid,
     );
   }
 
@@ -75,6 +85,12 @@ export async function PATCH(
     const value = body.paymentProofUrl ?? body.payment_proof_url;
     patch.paymentScreenshotUrl =
       value === null || value === "" ? null : String(value);
+  }
+
+  if (hasOwn(body, "internalNotes") || hasOwn(body, "internal_notes")) {
+    patch.internalNotes = String(
+      body.internalNotes ?? body.internal_notes ?? "",
+    );
   }
 
   if (
@@ -99,7 +115,8 @@ export async function PATCH(
     );
     const action =
       participant.settlementStatus === "Fully Cleared" &&
-      patch.settlementStatus === "Fully Cleared"
+      (patch.settlementStatus === "Fully Cleared" ||
+        patch.depositAmountPaidEgp !== undefined)
         ? "POST_RUN_BALANCE_CLEARED"
         : "POST_RUN_PARTICIPANT_UPDATED";
     const description =
@@ -111,6 +128,53 @@ export async function PATCH(
       action,
       description,
       `post-run-update:${participant.id}:${participant.updatedAt}`,
+    );
+
+    return NextResponse.json(
+      { success: true, participant: toParticipantResponse(participant) },
+      { headers: POST_RUN_NO_STORE_HEADERS },
+    );
+  } catch (error) {
+    return postRunErrorResponse(
+      error,
+      `/api/events/${id}/participants/${participantId}`,
+    );
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  { params }: ParticipantRouteContext,
+) {
+  const session = await getAdminSessionFromRequest(request);
+
+  if (!session) {
+    return forbiddenPostRunResponse();
+  }
+
+  if (session.admin.role !== "super-admin") {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Super Admin access is required to delete participants.",
+      },
+      { status: 403, headers: POST_RUN_NO_STORE_HEADERS },
+    );
+  }
+
+  const { id, participantId } = await params;
+
+  try {
+    const participant = await deleteEventParticipant(
+      id,
+      participantId,
+      session.admin.phoneE164,
+    );
+    await recordAdminActivity(
+      session.admin,
+      "POST_RUN_PARTICIPANT_DELETED",
+      `${session.admin.displayName} deleted ${participant.name} from a post-run event`,
+      `post-run-participant-delete:${participant.id}:${participant.deletedAt}`,
     );
 
     return NextResponse.json(

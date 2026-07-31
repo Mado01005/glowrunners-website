@@ -87,9 +87,17 @@ export async function POST(
         ? "Verified"
         : "Pending",
     depositAmountPaidEgp:
-      body.depositPaid === undefined && body.deposit_paid === undefined
+      body.amountPaid === undefined &&
+      body.amount_paid === undefined &&
+      body.depositPaid === undefined &&
+      body.deposit_paid === undefined
         ? 0
-        : toFiniteNumber(body.depositPaid ?? body.deposit_paid),
+        : toFiniteNumber(
+            body.amountPaid ??
+              body.amount_paid ??
+              body.depositPaid ??
+              body.deposit_paid,
+          ),
     paymentScreenshotUrl:
       typeof (body.paymentProofUrl ?? body.payment_proof_url) === "string"
         ? String(body.paymentProofUrl ?? body.payment_proof_url)
@@ -99,6 +107,10 @@ export async function POST(
       body.settlement_status === "FULLY_CLEARED"
         ? "Fully Cleared"
         : "Unpaid",
+    internalNotes:
+      typeof (body.internalNotes ?? body.internal_notes) === "string"
+        ? String(body.internalNotes ?? body.internal_notes)
+        : "",
   };
 
   try {

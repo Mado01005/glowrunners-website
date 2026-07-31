@@ -1,5 +1,7 @@
 "use client";
 
+import Image from "next/image";
+import Link from "next/link";
 import {
   useCallback,
   useEffect,
@@ -9,20 +11,33 @@ import {
   useState,
   type ChangeEvent,
   type FormEvent,
+  type ReactNode,
 } from "react";
 
 type DepositStatus = "PENDING" | "VERIFIED";
 type SettlementStatus = "UNPAID" | "FULLY_CLEARED";
+type PaymentFilter = "all" | "unpaid" | "deposit" | "cleared";
+type EventModal = "create" | "edit" | null;
+
+type ActiveAdmin = Readonly<{
+  id: string;
+  displayName: string;
+  phoneE164: string;
+  role: "super-admin" | "admin";
+}>;
 
 type PostRunEvent = Readonly<{
   id: string;
   title: string;
   runDate: string;
   totalCost: number;
+  eventTicketPrice: number;
   depositAmount: number;
+  standardDeposit: number;
   paymentInstructions: string;
   capacity: number | null;
   createdAt: string;
+  updatedAt: string;
   createdByAdmin?: string;
 }>;
 
@@ -33,30 +48,34 @@ type Participant = Readonly<{
   phoneNumber: string;
   depositStatus: DepositStatus;
   depositPaid: number;
+  amountPaid: number;
   paymentProofUrl: string;
   remainingBalance: number;
   settlementStatus: SettlementStatus;
   updatedByAdmin: string;
+  internalNotes: string;
   createdAt: string;
   updatedAt: string;
 }>;
 
+type ParticipantPatch = Readonly<{
+  amountPaid?: number;
+  paymentProofUrl?: string;
+  internalNotes?: string;
+}>;
+
 type ApiObject = Record<string, unknown>;
-type ViewMode = "ledger" | "settlement";
 
-const EGP_FORMATTER = new Intl.NumberFormat("en-EG", {
-  style: "currency",
-  currency: "EGP",
-  currencyDisplay: "narrowSymbol",
-  maximumFractionDigits: 2,
-});
+type EventFormState = {
+  title: string;
+  runDate: string;
+  totalCost: string;
+  depositAmount: string;
+  capacity: string;
+  paymentInstructions: string;
+};
 
-const DATE_FORMATTER = new Intl.DateTimeFormat("en-EG", {
-  dateStyle: "medium",
-  timeZone: "Africa/Cairo",
-});
-
-const EMPTY_EVENT_FORM = {
+const EMPTY_EVENT_FORM: EventFormState = {
   title: "",
   runDate: "",
   totalCost: "",
@@ -70,6 +89,17 @@ const EMPTY_PARTICIPANT_FORM = {
   phoneNumber: "",
 };
 
+const SESSION_STORAGE_KEY = "glowrunners.admin.identity.v1";
+
+const MONEY_FORMATTER = new Intl.NumberFormat("en-EG", {
+  maximumFractionDigits: 2,
+});
+
+const DATE_FORMATTER = new Intl.DateTimeFormat("en-EG", {
+  dateStyle: "medium",
+  timeZone: "Africa/Cairo",
+});
+
 function isObject(value: unknown): value is ApiObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -81,7 +111,13 @@ function readError(payload: unknown, fallback: string) {
 }
 
 function formatMoney(value: number) {
-  return EGP_FORMATTER.format(Number.isFinite(value) ? Math.max(0, value) : 0);
+  const safeValue = Number.isFinite(value) ? value : 0;
+  return `${MONEY_FORMATTER.format(safeValue)} EGP`;
+}
+
+function formatCompactMoney(value: number) {
+  const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+  return MONEY_FORMATTER.format(safeValue);
 }
 
 function formatEventDate(value: string) {
@@ -97,6 +133,44 @@ function whatsappPhone(value: string) {
 
 function whatsappLink(phone: string, message: string) {
   return `https://wa.me/${whatsappPhone(phone)}?text=${encodeURIComponent(message)}`;
+}
+
+function paymentState(participant: Participant, event: PostRunEvent) {
+  const amountPaid = Number.isFinite(participant.amountPaid)
+    ? Math.max(0, participant.amountPaid)
+    : 0;
+  const remaining = Math.max(
+    0,
+    Math.round((event.totalCost - amountPaid) * 100) / 100,
+  );
+
+  if (amountPaid <= 0) {
+    return {
+      kind: "unpaid" as const,
+      amountPaid,
+      remaining,
+      label: "🔴 Unpaid",
+      longLabel: "Unpaid (Cash on Friday)",
+    };
+  }
+
+  if (amountPaid >= event.totalCost) {
+    return {
+      kind: "cleared" as const,
+      amountPaid,
+      remaining: 0,
+      label: "🟢 Cleared",
+      longLabel: "Fully Cleared",
+    };
+  }
+
+  return {
+    kind: "deposit" as const,
+    amountPaid,
+      remaining,
+      label: `🟡 Deposit ${formatCompactMoney(amountPaid)} EGP`,
+    longLabel: "Deposit Verified",
+  };
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -118,12 +192,42 @@ async function apiRequest(
   });
   const payload = await readJson(response);
 
-  if (response.status === 403 && typeof window !== "undefined") {
-    const next = `${window.location.pathname}${window.location.search}`;
-    window.location.assign(`/admin/login?next=${encodeURIComponent(next)}`);
+  if (typeof window !== "undefined") {
+    if (response.status === 401) {
+      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      const next = `${window.location.pathname}${window.location.search}`;
+      window.location.assign(`/admin/login?next=${encodeURIComponent(next)}`);
+    } else if (
+      response.status === 403 &&
+      readError(payload, "") === "Forbidden."
+    ) {
+      const next = `${window.location.pathname}${window.location.search}`;
+      window.location.assign(`/admin/login?next=${encodeURIComponent(next)}`);
+    }
   }
 
   return { response, payload };
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error("Clipboard access is unavailable on this device.");
+  }
 }
 
 async function compressProofImage(file: File): Promise<File> {
@@ -139,13 +243,12 @@ async function compressProofImage(file: File): Promise<File> {
 
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const candidate = new Image();
+      const candidate = new window.Image();
       candidate.onload = () => resolve(candidate);
       candidate.onerror = () =>
         reject(new Error("This image could not be opened on this device."));
       candidate.src = sourceUrl;
     });
-
     let maxEdge = 1800;
     let quality = 0.86;
 
@@ -163,7 +266,6 @@ async function compressProofImage(file: File): Promise<File> {
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, canvas.width, canvas.height);
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
-
       const blob = await new Promise<Blob | null>((resolve) => {
         canvas.toBlob(resolve, "image/jpeg", quality);
       });
@@ -198,10 +300,12 @@ function ModalShell({
   title,
   children,
   onClose,
+  layer = "normal",
 }: {
   title: string;
-  children: React.ReactNode;
+  children: ReactNode;
   onClose: () => void;
+  layer?: "normal" | "lightbox";
 }) {
   const titleId = useId();
   const dialogRef = useRef<HTMLElement>(null);
@@ -213,19 +317,17 @@ function ModalShell({
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
+    const previousOverflow = document.body.style.overflow;
     const dialog = dialogRef.current;
     const focusableSelector =
       'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+    document.body.style.overflow = "hidden";
 
-    const focusFirstControl = () => {
-      const firstControl =
-        dialog?.querySelector<HTMLElement>("[data-modal-autofocus]") ??
-        dialog?.querySelector<HTMLElement>(focusableSelector) ??
-        dialog;
-      firstControl?.focus();
-    };
-
-    focusFirstControl();
+    const firstControl =
+      dialog?.querySelector<HTMLElement>("[data-modal-autofocus]") ??
+      dialog?.querySelector<HTMLElement>(focusableSelector) ??
+      dialog;
+    firstControl?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -264,13 +366,16 @@ function ModalShell({
 
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
       previouslyFocused?.focus();
     };
   }, []);
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center overflow-y-auto bg-black/85 p-3 sm:items-center"
+      className={`fixed inset-0 ${
+        layer === "lightbox" ? "z-[70]" : "z-50"
+      } flex items-end justify-center overflow-y-auto bg-black/85 sm:items-center sm:p-3`}
       onMouseDown={(event) => {
         if (event.currentTarget === event.target) {
           onClose();
@@ -283,10 +388,10 @@ function ModalShell({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="max-h-[94svh] w-full max-w-md overflow-y-auto rounded-2xl border border-zinc-700 bg-zinc-950 p-4 text-white shadow-2xl outline-none"
+        className="max-h-[92svh] w-full max-w-md overflow-y-auto rounded-t-3xl border border-zinc-700 bg-zinc-950 p-4 text-white shadow-2xl outline-none sm:rounded-3xl"
       >
         <div className="flex items-center justify-between gap-3">
-          <h2 id={titleId} className="min-w-0 text-lg font-black">
+          <h2 id={titleId} className="min-w-0 truncate text-lg font-black">
             {title}
           </h2>
           <button
@@ -304,35 +409,181 @@ function ModalShell({
   );
 }
 
+function EventFormFields({
+  form,
+  onChange,
+  submitLabel,
+  isBusy,
+}: {
+  form: EventFormState;
+  onChange: (next: EventFormState) => void;
+  submitLabel: string;
+  isBusy: boolean;
+}) {
+  return (
+    <div className="mt-4 flex flex-col gap-3">
+      <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
+        Event title
+        <input
+          type="text"
+          required
+          maxLength={120}
+          data-modal-autofocus
+          value={form.title}
+          onChange={(event) => onChange({ ...form, title: event.target.value })}
+          placeholder="Post-Run Kayaking"
+          className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
+        />
+      </label>
+      <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
+        Associated date
+        <input
+          type="date"
+          required
+          value={form.runDate}
+          onChange={(event) =>
+            onChange({ ...form, runDate: event.target.value })
+          }
+          className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
+        />
+      </label>
+      <div className="grid min-w-0 grid-cols-2 gap-2">
+        <label className="min-w-0 text-xs font-black uppercase tracking-wide text-zinc-400">
+          Ticket price
+          <input
+            type="number"
+            required
+            min="0"
+            step="0.01"
+            inputMode="decimal"
+            value={form.totalCost}
+            onChange={(event) =>
+              onChange({ ...form, totalCost: event.target.value })
+            }
+            className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
+          />
+        </label>
+        <label className="min-w-0 text-xs font-black uppercase tracking-wide text-zinc-400">
+          Standard deposit
+          <input
+            type="number"
+            required
+            min="0"
+            step="0.01"
+            inputMode="decimal"
+            value={form.depositAmount}
+            onChange={(event) =>
+              onChange({ ...form, depositAmount: event.target.value })
+            }
+            className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
+          />
+        </label>
+      </div>
+      <p className="rounded-xl bg-zinc-900 p-3 text-sm font-bold text-zinc-300">
+        Standard balance after deposit:{" "}
+        <span className="text-amber-300">
+          {formatMoney(
+            Math.max(
+              0,
+              Number(form.totalCost || 0) - Number(form.depositAmount || 0),
+            ),
+          )}
+        </span>
+      </p>
+      <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
+        Max capacity (optional)
+        <input
+          type="number"
+          min="1"
+          step="1"
+          inputMode="numeric"
+          value={form.capacity}
+          onChange={(event) =>
+            onChange({ ...form, capacity: event.target.value })
+          }
+          className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
+        />
+      </label>
+      <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
+        Payment instructions
+        <textarea
+          required
+          maxLength={2000}
+          rows={3}
+          value={form.paymentInstructions}
+          onChange={(event) =>
+            onChange({ ...form, paymentInstructions: event.target.value })
+          }
+          placeholder="InstaPay link or Vodafone Cash number"
+          className="mt-1.5 w-full min-w-0 resize-y rounded-xl border border-zinc-700 bg-black p-3 text-base font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
+        />
+      </label>
+      <button
+        type="submit"
+        disabled={isBusy}
+        className="min-h-14 w-full rounded-xl bg-fuchsia-500 px-4 text-base font-black text-white disabled:opacity-50"
+      >
+        {submitLabel}
+      </button>
+    </div>
+  );
+}
+
 export function PostRunEventsDashboard() {
+  const [admin, setAdmin] = useState<ActiveAdmin | null>(null);
   const [events, setEvents] = useState<PostRunEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState("");
   const [participants, setParticipants] = useState<Participant[]>([]);
-  const [eventForm, setEventForm] = useState(EMPTY_EVENT_FORM);
+  const [eventModal, setEventModal] = useState<EventModal>(null);
+  const [eventForm, setEventForm] =
+    useState<EventFormState>(EMPTY_EVENT_FORM);
   const [participantForm, setParticipantForm] = useState(
     EMPTY_PARTICIPANT_FORM,
   );
-  const [depositDrafts, setDepositDrafts] = useState<Record<string, string>>({});
+  const [selectedParticipantId, setSelectedParticipantId] = useState("");
+  const [paymentDraft, setPaymentDraft] = useState("");
+  const [notesDraft, setNotesDraft] = useState("");
+  const [paymentFilter, setPaymentFilter] =
+    useState<PaymentFilter>("all");
   const [search, setSearch] = useState("");
-  const [viewMode, setViewMode] = useState<ViewMode>("ledger");
-  const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [lightboxUrl, setLightboxUrl] = useState("");
   const [busyKey, setBusyKey] = useState("");
-  const participantsRequestIdRef = useRef(0);
-  const activeOperationRef = useRef(false);
   const [isLoadingEvents, setIsLoadingEvents] = useState(true);
   const [isLoadingParticipants, setIsLoadingParticipants] = useState(false);
   const [notice, setNotice] = useState<{
     tone: "success" | "error" | "idle";
     message: string;
-  }>({
-    tone: "idle",
-    message: "Loading post-run events…",
-  });
+  }>({ tone: "idle", message: "" });
+  const participantsRequestIdRef = useRef(0);
+  const activeOperationRef = useRef(false);
 
   const selectedEvent =
     events.find((event) => event.id === selectedEventId) ?? null;
+  const selectedParticipant =
+    participants.find(
+      (participant) => participant.id === selectedParticipantId,
+    ) ?? null;
+  const isSuperAdmin = admin?.role === "super-admin";
   const isAnyBusy = busyKey.length > 0;
+
+  const loadSession = useCallback(async () => {
+    const { response, payload } = await apiRequest("/api/auth/session");
+
+    if (
+      !response.ok ||
+      !isObject(payload) ||
+      !isObject(payload.admin)
+    ) {
+      throw new Error(readError(payload, "Admin session could not be loaded."));
+    }
+
+    const nextAdmin = payload.admin as ActiveAdmin;
+    setAdmin(nextAdmin);
+    window.sessionStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify(nextAdmin),
+    );
+  }, []);
 
   const loadEvents = useCallback(async () => {
     setIsLoadingEvents(true);
@@ -350,25 +601,11 @@ export function PostRunEventsDashboard() {
 
       const nextEvents = payload.events as PostRunEvent[];
       setEvents(nextEvents);
-      setSelectedEventId((current) => {
-        if (nextEvents.some((event) => event.id === current)) {
-          return current;
-        }
-        return nextEvents[0]?.id ?? "";
-      });
-      setNotice({
-        tone: "idle",
-        message:
-          nextEvents.length > 0
-            ? "Event ledger is ready."
-            : "Create the first post-run event to begin.",
-      });
-    } catch (error) {
-      setNotice({
-        tone: "error",
-        message:
-          error instanceof Error ? error.message : "Events could not be loaded.",
-      });
+      setSelectedEventId((current) =>
+        nextEvents.some((event) => event.id === current)
+          ? current
+          : (nextEvents[0]?.id ?? ""),
+      );
     } finally {
       setIsLoadingEvents(false);
     }
@@ -378,7 +615,6 @@ export function PostRunEventsDashboard() {
     const requestId = participantsRequestIdRef.current + 1;
     participantsRequestIdRef.current = requestId;
     setParticipants([]);
-    setDepositDrafts({});
 
     if (!eventId) {
       setIsLoadingParticipants(false);
@@ -386,10 +622,6 @@ export function PostRunEventsDashboard() {
     }
 
     setIsLoadingParticipants(true);
-    setNotice({
-      tone: "idle",
-      message: "Loading participant ledger…",
-    });
 
     try {
       const { response, payload } = await apiRequest(
@@ -404,41 +636,19 @@ export function PostRunEventsDashboard() {
         throw new Error(readError(payload, "Participants could not be loaded."));
       }
 
-      const nextParticipants = payload.participants as Participant[];
-
-      if (participantsRequestIdRef.current !== requestId) {
-        return;
+      if (participantsRequestIdRef.current === requestId) {
+        setParticipants(payload.participants as Participant[]);
       }
-
-      setParticipants(nextParticipants);
-      setDepositDrafts(
-        Object.fromEntries(
-          nextParticipants.map((participant) => [
-            participant.id,
-            String(participant.depositPaid),
-          ]),
-        ),
-      );
-      setNotice({
-        tone: "idle",
-        message:
-          nextParticipants.length > 0
-            ? "Participant ledger is ready."
-            : "No participants are registered for this event yet.",
-      });
     } catch (error) {
-      if (participantsRequestIdRef.current !== requestId) {
-        return;
+      if (participantsRequestIdRef.current === requestId) {
+        setNotice({
+          tone: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Participants could not be loaded.",
+        });
       }
-
-      setParticipants([]);
-      setNotice({
-        tone: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Participants could not be loaded.",
-      });
     } finally {
       if (participantsRequestIdRef.current === requestId) {
         setIsLoadingParticipants(false);
@@ -447,57 +657,87 @@ export function PostRunEventsDashboard() {
   }, []);
 
   useEffect(() => {
-    void loadEvents();
-  }, [loadEvents]);
+    void Promise.all([loadSession(), loadEvents()]).catch((error: unknown) => {
+      setNotice({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The event manager could not be loaded.",
+      });
+    });
+  }, [loadEvents, loadSession]);
 
   useEffect(() => {
+    setSelectedParticipantId("");
+    setSearch("");
+    setPaymentFilter("all");
     void loadParticipants(selectedEventId);
   }, [loadParticipants, selectedEventId]);
 
   const totals = useMemo(() => {
     if (!selectedEvent) {
-      return { expected: 0, deposits: 0, pending: 0 };
+      return { expected: 0, collected: 0, remaining: 0 };
     }
 
-    return participants.reduce(
-      (summary, participant) => ({
-        expected: summary.expected + selectedEvent.totalCost,
-        deposits:
-          summary.deposits +
-          (participant.depositStatus === "VERIFIED"
-            ? participant.depositPaid
-            : 0),
-        pending: summary.pending + participant.remainingBalance,
-      }),
-      { expected: 0, deposits: 0, pending: 0 },
+    const expected = selectedEvent.totalCost * participants.length;
+    const collected = participants.reduce(
+      (sum, participant) =>
+        sum +
+        (Number.isFinite(participant.amountPaid)
+          ? Math.max(0, participant.amountPaid)
+          : 0),
+      0,
     );
+
+    return {
+      expected,
+      collected,
+      remaining: expected - collected,
+    };
   }, [participants, selectedEvent]);
 
   const visibleParticipants = useMemo(() => {
-    const normalizedSearch = search.trim().toLocaleLowerCase();
-    const matching = normalizedSearch
-      ? participants.filter((participant) =>
-          [
-            participant.fullName,
-            participant.phoneNumber,
-            participant.depositStatus,
-            participant.settlementStatus,
-          ]
-            .join(" ")
-            .toLocaleLowerCase()
-            .includes(normalizedSearch),
-        )
-      : participants;
+    if (!selectedEvent) {
+      return [];
+    }
 
-    return viewMode === "settlement"
-      ? [...matching].sort((left, right) => {
-          if (left.settlementStatus !== right.settlementStatus) {
-            return left.settlementStatus === "UNPAID" ? -1 : 1;
-          }
-          return left.fullName.localeCompare(right.fullName);
-        })
-      : matching;
-  }, [participants, search, viewMode]);
+    const normalizedSearch = search.trim().toLocaleLowerCase("en-US");
+
+    return participants.filter((participant) => {
+      const state = paymentState(participant, selectedEvent);
+      const matchesFilter =
+        paymentFilter === "all" || state.kind === paymentFilter;
+      const matchesSearch =
+        !normalizedSearch ||
+        `${participant.fullName} ${participant.phoneNumber}`
+          .toLocaleLowerCase("en-US")
+          .includes(normalizedSearch);
+      return matchesFilter && matchesSearch;
+    });
+  }, [participants, paymentFilter, search, selectedEvent]);
+
+  const openCreateEvent = () => {
+    setEventForm(EMPTY_EVENT_FORM);
+    setEventModal("create");
+  };
+
+  const openEditEvent = () => {
+    if (!selectedEvent || !isSuperAdmin) {
+      return;
+    }
+
+    setEventForm({
+      title: selectedEvent.title,
+      runDate: selectedEvent.runDate,
+      totalCost: String(selectedEvent.totalCost),
+      depositAmount: String(selectedEvent.depositAmount),
+      capacity:
+        selectedEvent.capacity === null ? "" : String(selectedEvent.capacity),
+      paymentInstructions: selectedEvent.paymentInstructions,
+    });
+    setEventModal("edit");
+  };
 
   const createEvent = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -516,6 +756,8 @@ export function PostRunEventsDashboard() {
         body: JSON.stringify({
           title: eventForm.title,
           runDate: eventForm.runDate,
+          eventTicketPrice: Number(eventForm.totalCost),
+          standardDeposit: Number(eventForm.depositAmount),
           totalCost: Number(eventForm.totalCost),
           depositAmount: Number(eventForm.depositAmount),
           capacity: eventForm.capacity ? Number(eventForm.capacity) : null,
@@ -529,12 +771,8 @@ export function PostRunEventsDashboard() {
 
       const created = payload.event as PostRunEvent;
       setEvents((current) => [created, ...current]);
-      setParticipants([]);
-      setDepositDrafts({});
-      setSearch("");
       setSelectedEventId(created.id);
-      setEventForm(EMPTY_EVENT_FORM);
-      setIsEventModalOpen(false);
+      setEventModal(null);
       setNotice({
         tone: "success",
         message: `${created.title} was created.`,
@@ -553,14 +791,118 @@ export function PostRunEventsDashboard() {
     }
   };
 
-  const addParticipant = async (event: FormEvent<HTMLFormElement>) => {
+  const editEvent = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    if (!selectedEvent || isLoadingParticipants) {
+    if (!selectedEvent || !isSuperAdmin || activeOperationRef.current) {
       return;
     }
 
-    if (activeOperationRef.current) {
+    activeOperationRef.current = true;
+    setBusyKey("edit-event");
+
+    try {
+      const { response, payload } = await apiRequest(
+        `/api/events/${encodeURIComponent(selectedEvent.id)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: eventForm.title,
+            runDate: eventForm.runDate,
+            eventTicketPrice: Number(eventForm.totalCost),
+            standardDeposit: Number(eventForm.depositAmount),
+            capacity: eventForm.capacity ? Number(eventForm.capacity) : null,
+            paymentInstructions: eventForm.paymentInstructions,
+          }),
+        },
+      );
+
+      if (!response.ok || !isObject(payload) || !isObject(payload.event)) {
+        throw new Error(readError(payload, "Event settings could not be saved."));
+      }
+
+      const updated = payload.event as PostRunEvent;
+      setEvents((current) =>
+        current.map((candidate) =>
+          candidate.id === updated.id ? updated : candidate,
+        ),
+      );
+      setEventModal(null);
+      setNotice({
+        tone: "success",
+        message: `${updated.title} settings were updated.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Event settings could not be saved.",
+      });
+    } finally {
+      activeOperationRef.current = false;
+      setBusyKey("");
+    }
+  };
+
+  const archiveEvent = async () => {
+    if (
+      !selectedEvent ||
+      !isSuperAdmin ||
+      activeOperationRef.current ||
+      !window.confirm(
+        `Archive "${selectedEvent.title}"? It will leave the active event list but remain in the audit ledger.`,
+      )
+    ) {
+      return;
+    }
+
+    activeOperationRef.current = true;
+    setBusyKey("archive-event");
+
+    try {
+      const { response, payload } = await apiRequest(
+        `/api/events/${encodeURIComponent(selectedEvent.id)}`,
+        { method: "DELETE" },
+      );
+
+      if (!response.ok) {
+        throw new Error(readError(payload, "The event could not be archived."));
+      }
+
+      const remainingEvents = events.filter(
+        (candidate) => candidate.id !== selectedEvent.id,
+      );
+      setEvents(remainingEvents);
+      setSelectedEventId(remainingEvents[0]?.id ?? "");
+      setNotice({
+        tone: "success",
+        message: `${selectedEvent.title} was archived.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The event could not be archived.",
+      });
+    } finally {
+      activeOperationRef.current = false;
+      setBusyKey("");
+    }
+  };
+
+  const addParticipant = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (
+      !selectedEvent ||
+      isLoadingParticipants ||
+      activeOperationRef.current
+    ) {
       return;
     }
 
@@ -589,14 +931,10 @@ export function PostRunEventsDashboard() {
 
       const created = payload.participant as Participant;
       setParticipants((current) => [created, ...current]);
-      setDepositDrafts((current) => ({
-        ...current,
-        [created.id]: String(created.depositPaid),
-      }));
       setParticipantForm(EMPTY_PARTICIPANT_FORM);
       setNotice({
         tone: "success",
-        message: `${created.fullName} was added to ${selectedEvent.title}.`,
+        message: `${created.fullName} was added.`,
       });
     } catch (error) {
       setNotice({
@@ -615,42 +953,35 @@ export function PostRunEventsDashboard() {
   const updateParticipant = useCallback(
     async (
       participant: Participant,
-      patch: Partial<
-        Pick<
-          Participant,
-          | "depositStatus"
-          | "depositPaid"
-          | "paymentProofUrl"
-          | "settlementStatus"
-        >
-      >,
-      busyAction: string,
-    ) => {
-      if (!selectedEvent) {
-        return;
-      }
-
-      if (activeOperationRef.current) {
-        return;
+      patch: ParticipantPatch,
+      action: string,
+    ): Promise<Participant | null> => {
+      if (!selectedEvent || activeOperationRef.current) {
+        return null;
       }
 
       activeOperationRef.current = true;
+      setBusyKey(`${action}:${participant.id}`);
       const previous = participant;
+      const nextAmount = patch.amountPaid ?? participant.amountPaid;
+      const optimisticState = paymentState(
+        { ...participant, amountPaid: nextAmount },
+        selectedEvent,
+      );
       const optimistic: Participant = {
         ...participant,
         ...patch,
-        remainingBalance:
-          patch.settlementStatus === "FULLY_CLEARED"
-            ? 0
-            : Math.max(
-                0,
-                selectedEvent.totalCost -
-                  (patch.depositPaid ?? participant.depositPaid),
-              ),
+        amountPaid: nextAmount,
+        depositPaid: nextAmount,
+        remainingBalance: optimisticState.remaining,
+        depositStatus:
+          optimisticState.kind === "unpaid" ? "PENDING" : "VERIFIED",
+        settlementStatus:
+          optimisticState.kind === "cleared"
+            ? "FULLY_CLEARED"
+            : "UNPAID",
         updatedAt: new Date().toISOString(),
       };
-
-      setBusyKey(`${busyAction}:${participant.id}`);
       setParticipants((current) =>
         current.map((candidate) =>
           candidate.id === participant.id ? optimistic : candidate,
@@ -685,17 +1016,14 @@ export function PostRunEventsDashboard() {
             candidate.id === participant.id ? updated : candidate,
           ),
         );
-        setDepositDrafts((current) => ({
-          ...current,
-          [participant.id]: String(updated.depositPaid),
-        }));
         setNotice({
           tone: "success",
           message:
-            updated.settlementStatus === "FULLY_CLEARED"
+            action === "clear"
               ? `${updated.fullName} is fully cleared.`
               : `${updated.fullName}'s ledger was updated.`,
         });
+        return updated;
       } catch (error) {
         setParticipants((current) =>
           current.map((candidate) =>
@@ -709,6 +1037,7 @@ export function PostRunEventsDashboard() {
               ? error.message
               : "The participant could not be updated.",
         });
+        return null;
       } finally {
         activeOperationRef.current = false;
         setBusyKey("");
@@ -717,6 +1046,22 @@ export function PostRunEventsDashboard() {
     [selectedEvent],
   );
 
+  const clearParticipant = async (participant: Participant) => {
+    if (!selectedEvent) {
+      return;
+    }
+
+    const updated = await updateParticipant(
+      participant,
+      { amountPaid: selectedEvent.totalCost },
+      "clear",
+    );
+
+    if (updated && selectedParticipantId === updated.id) {
+      setPaymentDraft(String(updated.amountPaid));
+    }
+  };
+
   const uploadProof = async (
     participant: Participant,
     event: ChangeEvent<HTMLInputElement>,
@@ -724,11 +1069,7 @@ export function PostRunEventsDashboard() {
     const file = event.target.files?.[0];
     event.target.value = "";
 
-    if (!file) {
-      return;
-    }
-
-    if (activeOperationRef.current) {
+    if (!file || activeOperationRef.current) {
       return;
     }
 
@@ -741,7 +1082,6 @@ export function PostRunEventsDashboard() {
       formData.set("file", compressed);
       formData.set("eventId", participant.eventId);
       formData.set("participantId", participant.id);
-
       const { response, payload } = await apiRequest("/api/upload-proof", {
         method: "POST",
         body: formData,
@@ -761,10 +1101,6 @@ export function PostRunEventsDashboard() {
           candidate.id === participant.id ? updated : candidate,
         ),
       );
-      setDepositDrafts((current) => ({
-        ...current,
-        [participant.id]: String(updated.depositPaid),
-      }));
       setNotice({
         tone: "success",
         message: `${updated.fullName}'s payment proof was saved.`,
@@ -780,6 +1116,100 @@ export function PostRunEventsDashboard() {
     } finally {
       activeOperationRef.current = false;
       setBusyKey("");
+    }
+  };
+
+  const deleteParticipant = async (participant: Participant) => {
+    if (
+      !selectedEvent ||
+      !isSuperAdmin ||
+      activeOperationRef.current ||
+      !window.confirm(
+        `Delete ${participant.fullName} from ${selectedEvent.title}?`,
+      )
+    ) {
+      return;
+    }
+
+    activeOperationRef.current = true;
+    setBusyKey(`delete:${participant.id}`);
+
+    try {
+      const { response, payload } = await apiRequest(
+        `/api/events/${encodeURIComponent(
+          selectedEvent.id,
+        )}/participants/${encodeURIComponent(participant.id)}`,
+        { method: "DELETE" },
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          readError(payload, "The participant could not be deleted."),
+        );
+      }
+
+      setParticipants((current) =>
+        current.filter((candidate) => candidate.id !== participant.id),
+      );
+      setSelectedParticipantId("");
+      setNotice({
+        tone: "success",
+        message: `${participant.fullName} was deleted from the event.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The participant could not be deleted.",
+      });
+    } finally {
+      activeOperationRef.current = false;
+      setBusyKey("");
+    }
+  };
+
+  const openParticipant = (participant: Participant) => {
+    setSelectedParticipantId(participant.id);
+    setPaymentDraft(String(participant.amountPaid));
+    setNotesDraft(participant.internalNotes ?? "");
+  };
+
+  const copySummary = async () => {
+    if (!selectedEvent) {
+      return;
+    }
+
+    const lines = participants.map((participant, index) => {
+      const state = paymentState(participant, selectedEvent);
+      return `${index + 1}. ${participant.fullName} · Paid ${formatMoney(
+        state.amountPaid,
+      )} · Owes ${formatMoney(state.remaining)} · ${state.longLabel}`;
+    });
+    const report = [
+      `📊 GlowRunners Post-Run Report – ${selectedEvent.title}`,
+      `📅 ${formatEventDate(selectedEvent.runDate)}`,
+      `👥 Registered: ${participants.length}`,
+      `💰 Expected Revenue: ${formatMoney(totals.expected)}`,
+      `✅ Total Collected: ${formatMoney(totals.collected)}`,
+      `🟡 Remaining Balance: ${formatMoney(totals.remaining)}`,
+      "",
+      ...lines,
+    ].join("\n");
+
+    try {
+      await copyText(report);
+      setNotice({
+        tone: "success",
+        message: "WhatsApp-ready event report copied.",
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        message:
+          error instanceof Error ? error.message : "Report could not be copied.",
+      });
     }
   };
 
@@ -800,6 +1230,7 @@ export function PostRunEventsDashboard() {
         throw new Error(readError(payload, "Sign out failed."));
       }
 
+      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
       window.location.assign("/admin/login");
     } catch (error) {
       setNotice({
@@ -817,155 +1248,113 @@ export function PostRunEventsDashboard() {
   const noticeClass =
     notice.tone === "success"
       ? "border-emerald-700 bg-emerald-950/60 text-emerald-200"
-      : notice.tone === "error"
-        ? "border-red-800 bg-red-950/60 text-red-200"
-        : "border-zinc-800 bg-zinc-950 text-zinc-300";
+      : "border-red-800 bg-red-950/60 text-red-200";
 
   return (
-    <main className="flex min-h-screen w-full flex-col items-center justify-start overflow-x-hidden bg-black px-4 py-4 text-white">
-      <div className="box-border flex w-full max-w-md min-w-0 flex-col gap-4">
+    <main className="flex min-h-screen w-full flex-col items-center justify-start overflow-x-hidden bg-black px-4 py-3 text-white">
+      <div className="box-border flex w-full max-w-md min-w-0 flex-col gap-3">
         <header className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="text-[11px] font-black uppercase tracking-[0.18em] text-fuchsia-400">
+            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-fuchsia-400">
               GlowRunners Admin
             </p>
-            <h1 className="mt-1 break-words text-2xl font-black leading-tight">
-              Post-Run Events
-            </h1>
-            <p className="mt-1 text-sm font-semibold text-zinc-400">
-              Deposits, proof, and Friday clearance.
+            <h1 className="truncate text-xl font-black">Post-Run Events</h1>
+            <p className="truncate text-xs font-semibold text-zinc-500">
+              {admin ? `Active: ${admin.displayName}` : "Loading admin…"}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void logout()}
-            disabled={isAnyBusy}
-            className="min-h-11 shrink-0 rounded-xl border border-zinc-700 px-3 text-xs font-black text-zinc-200 disabled:opacity-50"
-          >
-            Sign out
-          </button>
+          <div className="flex shrink-0 gap-2">
+            <Link
+              href="/admin"
+              className="flex min-h-11 items-center rounded-xl border border-zinc-700 px-3 text-xs font-black"
+            >
+              Gate
+            </Link>
+            <button
+              type="button"
+              onClick={() => void logout()}
+              disabled={isAnyBusy}
+              className="min-h-11 rounded-xl border border-zinc-700 px-3 text-xs font-black disabled:opacity-50"
+            >
+              Sign out
+            </button>
+          </div>
         </header>
 
-        <nav className="grid min-w-0 grid-cols-2 gap-2" aria-label="Admin areas">
-          <a
-            href="/admin"
-            className="flex min-h-11 min-w-0 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-950 px-3 text-center text-xs font-black"
+        {notice.tone !== "idle" && notice.message ? (
+          <div
+            className={`rounded-xl border px-3 py-2 text-xs font-bold ${noticeClass}`}
+            role={notice.tone === "error" ? "alert" : "status"}
+            aria-live="polite"
           >
-            Gate Control
-          </a>
-          <button
-            type="button"
-            onClick={() => setIsEventModalOpen(true)}
-            disabled={isAnyBusy || isLoadingEvents}
-            className="min-h-11 min-w-0 rounded-xl bg-fuchsia-500 px-3 text-xs font-black text-white disabled:opacity-50"
-          >
-            + New Event
-          </button>
-        </nav>
-
-        <div
-          className={`min-h-12 rounded-xl border p-3 text-sm font-bold ${noticeClass}`}
-          role={notice.tone === "error" ? "alert" : "status"}
-          aria-live="polite"
-        >
-          {notice.message}
-        </div>
+            {notice.message}
+          </div>
+        ) : null}
 
         {isLoadingEvents ? (
-          <section className="rounded-xl border border-zinc-800 bg-zinc-950 p-5 text-sm font-bold text-zinc-400">
+          <section className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-sm font-bold text-zinc-400">
             Loading events…
           </section>
         ) : events.length === 0 ? (
           <section className="rounded-2xl border border-dashed border-zinc-700 bg-zinc-950 p-6 text-center">
-            <h2 className="text-lg font-black">No post-run events yet</h2>
+            <h2 className="text-lg font-black">No active events</h2>
             <p className="mt-2 text-sm font-semibold text-zinc-400">
-              Create Horse Riding, Kayaking, Padel, Breakfast, or any Friday
-              activity.
+              Create the next post-run activity and start its ledger.
             </p>
             <button
               type="button"
-              onClick={() => setIsEventModalOpen(true)}
-              disabled={isAnyBusy || isLoadingEvents}
-              className="mt-4 min-h-12 w-full rounded-xl bg-white px-4 font-black text-black disabled:opacity-50"
+              onClick={openCreateEvent}
+              className="mt-4 min-h-12 w-full rounded-xl bg-fuchsia-500 px-4 font-black"
             >
-              Create first event
+              + Create event
             </button>
           </section>
         ) : (
           <>
-            <section
-              className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-3"
-              aria-label="Choose an event"
-            >
-              <label
-                htmlFor="event-selector"
-                className="text-[11px] font-black uppercase tracking-wide text-zinc-500"
-              >
-                Active ledger
+            <section className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2">
+              <label className="min-w-0">
+                <span className="sr-only">Active event</span>
+                <select
+                  value={selectedEventId}
+                  disabled={isAnyBusy}
+                  onChange={(event) => setSelectedEventId(event.target.value)}
+                  className="min-h-11 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-sm font-black text-white outline-none focus:border-fuchsia-400"
+                >
+                  {events.map((event) => (
+                    <option value={event.id} key={event.id}>
+                      {event.title} · {formatEventDate(event.runDate)}
+                    </option>
+                  ))}
+                </select>
               </label>
-              <select
-                id="event-selector"
-                value={selectedEventId}
+              <button
+                type="button"
+                onClick={openCreateEvent}
                 disabled={isAnyBusy}
-                onChange={(event) => {
-                  setSearch("");
-                  setParticipants([]);
-                  setDepositDrafts({});
-                  setNotice({
-                    tone: "idle",
-                    message: "Loading participant ledger…",
-                  });
-                  setSelectedEventId(event.target.value);
-                }}
-                className="mt-2 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black text-white outline-none focus:border-fuchsia-400 disabled:opacity-50"
+                className="min-h-11 rounded-xl bg-fuchsia-500 px-3 text-xs font-black disabled:opacity-50"
               >
-                {events.map((event) => (
-                  <option value={event.id} key={event.id}>
-                    {event.title} · {formatEventDate(event.runDate)}
-                  </option>
-                ))}
-              </select>
+                + Event
+              </button>
             </section>
 
             {selectedEvent ? (
               <>
-                <section className="min-w-0 rounded-2xl border border-fuchsia-900/70 bg-gradient-to-b from-fuchsia-950/60 to-zinc-950 p-4">
-                  <h2 className="break-words text-xl font-black">
-                    {selectedEvent.title}
-                  </h2>
-                  <p className="mt-1 text-sm font-bold text-fuchsia-200">
-                    {formatEventDate(selectedEvent.runDate)}
-                  </p>
-                  <div className="mt-3 grid min-w-0 grid-cols-3 gap-2">
-                    <div className="min-w-0 rounded-xl bg-black/55 p-2">
-                      <p className="text-[9px] font-black uppercase tracking-wide text-zinc-500">
-                        Total
-                      </p>
-                      <p className="mt-1 break-words text-xs font-black text-white">
-                        {formatMoney(selectedEvent.totalCost)}
-                      </p>
-                    </div>
-                    <div className="min-w-0 rounded-xl bg-black/55 p-2">
-                      <p className="text-[9px] font-black uppercase tracking-wide text-zinc-500">
-                        Deposit
-                      </p>
-                      <p className="mt-1 break-words text-xs font-black text-white">
+                <section className="min-w-0 rounded-xl border border-fuchsia-900/70 bg-fuchsia-950/25 px-3 py-2">
+                  <div className="flex min-w-0 items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <h2 className="truncate text-base font-black">
+                        {selectedEvent.title}
+                      </h2>
+                      <p className="truncate text-[11px] font-bold text-fuchsia-200">
+                        {formatEventDate(selectedEvent.runDate)} · Ticket{" "}
+                        {formatMoney(selectedEvent.totalCost)} · Deposit{" "}
                         {formatMoney(selectedEvent.depositAmount)}
                       </p>
                     </div>
-                    <div className="min-w-0 rounded-xl bg-black/55 p-2">
-                      <p className="text-[9px] font-black uppercase tracking-wide text-zinc-500">
-                        Capacity
-                      </p>
-                      <p className="mt-1 break-words text-xs font-black text-white">
-                        {participants.length}/
-                        {selectedEvent.capacity ?? "∞"}
-                      </p>
-                    </div>
+                    <span className="shrink-0 rounded-full bg-black/60 px-2 py-1 text-[10px] font-black">
+                      {participants.length}/{selectedEvent.capacity ?? "∞"}
+                    </span>
                   </div>
-                  <p className="mt-3 whitespace-pre-wrap break-words rounded-xl border border-zinc-800 bg-black/40 p-3 text-xs font-semibold text-zinc-300">
-                    {selectedEvent.paymentInstructions}
-                  </p>
                 </section>
 
                 <section
@@ -973,19 +1362,19 @@ export function PostRunEventsDashboard() {
                   aria-label="Financial overview"
                 >
                   {[
-                    ["Expected", totals.expected, "text-white"],
-                    ["Deposits", totals.deposits, "text-emerald-300"],
-                    ["Balance", totals.pending, "text-amber-300"],
+                    ["EXPECTED REVENUE", totals.expected, "text-white"],
+                    ["TOTAL COLLECTED", totals.collected, "text-emerald-300"],
+                    ["REMAINING BALANCE", totals.remaining, "text-amber-300"],
                   ].map(([label, value, color]) => (
                     <div
-                      className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-2.5"
+                      className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-2"
                       key={String(label)}
                     >
-                      <p className="break-words text-[9px] font-black uppercase tracking-wide text-zinc-500">
+                      <p className="min-h-5 break-words text-[8px] font-black uppercase leading-[10px] tracking-wide text-zinc-500">
                         {String(label)}
                       </p>
                       <p
-                        className={`mt-1 break-words text-xs font-black tabular-nums sm:text-sm ${String(
+                        className={`mt-1 truncate text-[11px] font-black tabular-nums sm:text-xs ${String(
                           color,
                         )}`}
                       >
@@ -995,30 +1384,61 @@ export function PostRunEventsDashboard() {
                   ))}
                 </section>
 
-                <form
-                  onSubmit={addParticipant}
-                  className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-4"
+                <section
+                  className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-2"
+                  aria-label="Event Options and Settings"
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <h2 className="text-sm font-black uppercase tracking-wide">
-                        Add participant
-                      </h2>
-                      <p className="mt-1 text-xs font-semibold text-zinc-500">
-                        Name and WhatsApp number.
-                      </p>
-                    </div>
-                    <span className="shrink-0 text-xs font-black text-zinc-400">
-                      {participants.length} joined
+                  <div className="mb-2 flex items-center justify-between gap-2 px-1">
+                    <h2 className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                      Event Options &amp; Settings
+                    </h2>
+                    <span className="text-[9px] font-bold text-zinc-600">
+                      {isSuperAdmin ? "SUPER ADMIN" : "READ ONLY"}
                     </span>
                   </div>
-                  <div className="mt-3 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div className="grid min-w-0 grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={openEditEvent}
+                      disabled={!isSuperAdmin || isAnyBusy}
+                      className="min-h-11 min-w-0 rounded-lg border border-zinc-700 px-2 text-[10px] font-black disabled:text-zinc-600"
+                    >
+                      Edit Event
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void copySummary()}
+                      disabled={isAnyBusy}
+                      className="min-h-11 min-w-0 rounded-lg border border-fuchsia-800 bg-fuchsia-950/30 px-2 text-[10px] font-black text-fuchsia-200 disabled:opacity-50"
+                    >
+                      Copy Report
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void archiveEvent()}
+                      disabled={!isSuperAdmin || isAnyBusy}
+                      className="min-h-11 min-w-0 rounded-lg border border-red-900 px-2 text-[10px] font-black text-red-300 disabled:text-zinc-600"
+                    >
+                      Archive
+                    </button>
+                  </div>
+                </section>
+
+                <details className="group min-w-0 rounded-xl border border-zinc-800 bg-zinc-950">
+                  <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between px-3 text-xs font-black">
+                    <span>+ ADD PARTICIPANT</span>
+                    <span className="text-zinc-500 group-open:rotate-45">+</span>
+                  </summary>
+                  <form
+                    onSubmit={addParticipant}
+                    className="grid min-w-0 grid-cols-1 gap-2 border-t border-zinc-800 p-3 sm:grid-cols-2"
+                  >
                     <input
                       type="text"
                       required
-                      maxLength={100}
+                      maxLength={120}
                       autoComplete="name"
-                      disabled={isLoadingParticipants || isAnyBusy}
+                      disabled={isAnyBusy}
                       placeholder="Participant name"
                       value={participantForm.fullName}
                       onChange={(event) =>
@@ -1027,7 +1447,7 @@ export function PostRunEventsDashboard() {
                           fullName: event.target.value,
                         }))
                       }
-                      className="min-h-12 min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold outline-none focus:border-fuchsia-400 disabled:opacity-50"
+                      className="min-h-12 min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold outline-none focus:border-fuchsia-400"
                     />
                     <input
                       type="tel"
@@ -1035,7 +1455,7 @@ export function PostRunEventsDashboard() {
                       maxLength={24}
                       inputMode="tel"
                       autoComplete="tel"
-                      disabled={isLoadingParticipants || isAnyBusy}
+                      disabled={isAnyBusy}
                       placeholder="WhatsApp phone"
                       value={participantForm.phoneNumber}
                       onChange={(event) =>
@@ -1044,54 +1464,51 @@ export function PostRunEventsDashboard() {
                           phoneNumber: event.target.value,
                         }))
                       }
-                      className="min-h-12 min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold outline-none focus:border-fuchsia-400 disabled:opacity-50"
+                      className="min-h-12 min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold outline-none focus:border-fuchsia-400"
                     />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={
-                      isAnyBusy ||
-                      isLoadingParticipants ||
-                      (selectedEvent.capacity !== null &&
-                        participants.length >= selectedEvent.capacity)
-                    }
-                    className="mt-2 min-h-12 w-full rounded-xl bg-white px-4 font-black text-black disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {busyKey === "add-participant"
-                      ? "Adding…"
-                      : selectedEvent.capacity !== null &&
-                          participants.length >= selectedEvent.capacity
-                        ? "Capacity reached"
+                    <button
+                      type="submit"
+                      disabled={
+                        isAnyBusy ||
+                        (selectedEvent.capacity !== null &&
+                          participants.length >= selectedEvent.capacity)
+                      }
+                      className="min-h-12 rounded-xl bg-white px-3 text-sm font-black text-black disabled:opacity-50 sm:col-span-2"
+                    >
+                      {busyKey === "add-participant"
+                        ? "Adding…"
                         : "Add participant"}
-                  </button>
-                </form>
+                    </button>
+                  </form>
+                </details>
 
                 <section className="min-w-0">
-                  <div className="grid min-w-0 grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setViewMode("ledger")}
-                      aria-pressed={viewMode === "ledger"}
-                      className={`min-h-12 min-w-0 rounded-xl px-3 text-sm font-black ${
-                        viewMode === "ledger"
-                          ? "bg-white text-black"
-                          : "border border-zinc-700 bg-zinc-950 text-zinc-300"
-                      }`}
-                    >
-                      Full Ledger
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setViewMode("settlement")}
-                      aria-pressed={viewMode === "settlement"}
-                      className={`min-h-12 min-w-0 rounded-xl px-3 text-sm font-black ${
-                        viewMode === "settlement"
-                          ? "bg-amber-300 text-black"
-                          : "border border-zinc-700 bg-zinc-950 text-zinc-300"
-                      }`}
-                    >
-                      Friday Mode
-                    </button>
+                  <div
+                    className="grid min-w-0 grid-cols-4 gap-1.5"
+                    aria-label="Filter participants"
+                  >
+                    {(
+                      [
+                        ["all", "All"],
+                        ["unpaid", "Unpaid (0 EGP)"],
+                        ["deposit", "Deposit Paid"],
+                        ["cleared", "Fully Cleared"],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        type="button"
+                        key={value}
+                        onClick={() => setPaymentFilter(value)}
+                        aria-pressed={paymentFilter === value}
+                        className={`min-h-11 min-w-0 rounded-lg px-1 text-[9px] font-black leading-tight ${
+                          paymentFilter === value
+                            ? "bg-white text-black"
+                            : "border border-zinc-800 bg-zinc-950 text-zinc-400"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                   <label className="sr-only" htmlFor="participant-search">
                     Search participants
@@ -1103,12 +1520,8 @@ export function PostRunEventsDashboard() {
                     enterKeyHint="search"
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
-                    placeholder={
-                      viewMode === "settlement"
-                        ? "Find someone to clear…"
-                        : "Search name, phone, or status…"
-                    }
-                    className="mt-2 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-4 text-base font-bold outline-none placeholder:text-zinc-600 focus:border-white"
+                    placeholder="Search name or phone…"
+                    className="mt-2 min-h-11 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-bold outline-none placeholder:text-zinc-600 focus:border-white"
                   />
                 </section>
 
@@ -1117,313 +1530,67 @@ export function PostRunEventsDashboard() {
                     Loading participant ledger…
                   </p>
                 ) : visibleParticipants.length === 0 ? (
-                  <p className="rounded-xl border border-dashed border-zinc-700 bg-zinc-950 p-5 text-center text-sm font-bold text-zinc-400">
+                  <p className="rounded-xl border border-dashed border-zinc-700 bg-zinc-950 p-4 text-center text-sm font-bold text-zinc-400">
                     {participants.length === 0
                       ? "No participants have been added."
-                      : "No participants match this search."}
+                      : "No participants match this filter."}
                   </p>
                 ) : (
-                  <div className="flex min-w-0 flex-col gap-3">
+                  <div
+                    className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-zinc-800"
+                    data-testid="compact-participant-list"
+                  >
                     {visibleParticipants.map((participant) => {
-                      const isCleared =
-                        participant.settlementStatus === "FULLY_CLEARED";
+                      const state = paymentState(participant, selectedEvent);
+                      const isCleared = state.kind === "cleared";
                       const isBusy = busyKey.endsWith(`:${participant.id}`);
-                      const depositRequest = `Hi ${participant.fullName}! You are registered for ${selectedEvent.title} on ${formatEventDate(
-                        selectedEvent.runDate,
-                      )}. Total cost: ${formatMoney(
-                        selectedEvent.totalCost,
-                      )}. Required deposit: ${formatMoney(
-                        selectedEvent.depositAmount,
-                      )}. Payment instructions: ${selectedEvent.paymentInstructions}`;
-                      const balanceReminder = `Hi ${participant.fullName}! Your ${formatMoney(
-                        participant.depositPaid,
-                      )} deposit for ${selectedEvent.title} is confirmed. Your remaining balance due on Friday is ${formatMoney(
-                        participant.remainingBalance,
-                      )}.`;
-                      const finalReceipt = `Hi ${participant.fullName}! Your payment for ${selectedEvent.title} is fully cleared. Remaining balance: 0 EGP. Thank you from GlowRunners!`;
 
                       return (
                         <article
                           key={participant.id}
-                          className={`min-w-0 rounded-2xl border p-4 ${
-                            isCleared
-                              ? "border-emerald-800 bg-emerald-950/30"
-                              : viewMode === "settlement"
-                                ? "border-amber-700 bg-amber-950/25"
-                                : "border-zinc-800 bg-zinc-950"
-                          }`}
+                          data-testid="compact-participant-row"
+                          className="grid h-[50px] min-w-0 grid-cols-[minmax(0,1fr)_72px] border-b border-zinc-800 bg-zinc-950 last:border-b-0"
                         >
-                          <div className="flex min-w-0 items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <h3 className="truncate text-base font-black">
+                          <button
+                            type="button"
+                            onClick={() => openParticipant(participant)}
+                            className="grid h-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 px-2 text-left outline-none focus:bg-zinc-900"
+                            aria-label={`Open ${participant.fullName} payment details`}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate text-[11px] font-black leading-tight">
                                 {participant.fullName}
-                              </h3>
-                              <a
-                                href={`tel:+${whatsappPhone(
-                                  participant.phoneNumber,
-                                )}`}
-                                className="mt-1 inline-flex min-h-11 max-w-full items-center truncate text-sm font-bold tabular-nums text-zinc-400"
-                              >
-                                +{whatsappPhone(participant.phoneNumber)}
-                              </a>
-                            </div>
-                            <div className="flex shrink-0 flex-col items-end gap-1">
-                              <span
-                                className={`rounded-full px-2.5 py-1 text-[10px] font-black ${
-                                  isCleared
-                                    ? "bg-emerald-900 text-emerald-200"
-                                    : "bg-amber-950 text-amber-200"
-                                }`}
-                              >
-                                {isCleared ? "FULLY CLEARED" : "BALANCE DUE"}
                               </span>
-                              <span
-                                className={`rounded-full px-2.5 py-1 text-[10px] font-black ${
-                                  participant.depositStatus === "VERIFIED"
-                                    ? "bg-sky-950 text-sky-200"
-                                    : "bg-zinc-900 text-zinc-400"
-                                }`}
-                              >
-                                DEPOSIT {participant.depositStatus}
+                              <span className="block truncate text-[9px] font-bold tabular-nums text-zinc-500">
+                                {participant.phoneNumber}
                               </span>
-                            </div>
-                          </div>
-
-                          <div className="mt-3 grid min-w-0 grid-cols-3 gap-2">
-                            <div className="min-w-0 rounded-lg bg-black/55 p-2">
-                              <p className="text-[9px] font-black uppercase text-zinc-500">
-                                Deposit
-                              </p>
-                              <p className="mt-1 break-words text-xs font-black text-emerald-300">
-                                {formatMoney(participant.depositPaid)}
-                              </p>
-                            </div>
-                            <div className="min-w-0 rounded-lg bg-black/55 p-2">
-                              <p className="text-[9px] font-black uppercase text-zinc-500">
-                                Remaining
-                              </p>
-                              <p className="mt-1 break-words text-xs font-black text-amber-300">
-                                {formatMoney(participant.remainingBalance)}
-                              </p>
-                            </div>
-                            <div className="min-w-0 rounded-lg bg-black/55 p-2">
-                              <p className="text-[9px] font-black uppercase text-zinc-500">
-                                Proof
-                              </p>
-                              <p className="mt-1 truncate text-xs font-black text-white">
-                                {participant.paymentProofUrl ? "Attached" : "None"}
-                              </p>
-                            </div>
-                          </div>
-
-                          {viewMode === "settlement" ? (
+                            </span>
+                            <span
+                              className={`max-w-[118px] truncate rounded-full px-1.5 py-1 text-[8px] font-black ${
+                                state.kind === "unpaid"
+                                  ? "bg-red-950 text-red-300"
+                                  : state.kind === "deposit"
+                                    ? "bg-amber-950 text-amber-200"
+                                    : "bg-emerald-950 text-emerald-300"
+                              }`}
+                            >
+                              {state.label}
+                            </span>
+                          </button>
+                          <div className="flex h-full min-w-0 flex-col items-stretch justify-center gap-0.5 border-l border-zinc-800 px-1">
+                            <span className="truncate text-center text-[8px] font-black tabular-nums text-amber-300">
+                              {isCleared
+                                ? "0 owed"
+                                : `${formatCompactMoney(state.remaining)} owed`}
+                            </span>
                             <button
                               type="button"
                               disabled={isCleared || isAnyBusy}
-                              onClick={() =>
-                                void updateParticipant(
-                                  participant,
-                                  { settlementStatus: "FULLY_CLEARED" },
-                                  "clear",
-                                )
-                              }
-                              className="mt-3 min-h-14 w-full rounded-xl bg-amber-300 px-4 text-base font-black text-black disabled:bg-emerald-900 disabled:text-emerald-200"
-                            >
-                              {isCleared
-                                ? "✓ Fully Cleared · 0 EGP"
-                                : isBusy
-                                  ? "Clearing…"
-                                  : `Clear Remaining · ${formatMoney(
-                                      participant.remainingBalance,
-                                    )}`}
-                            </button>
-                          ) : (
-                            <>
-                              <div className="mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2">
-                                <label className="min-w-0">
-                                  <span className="sr-only">
-                                    Deposit paid by {participant.fullName}
-                                  </span>
-                                  <input
-                                    type="number"
-                                    inputMode="decimal"
-                                    min="0"
-                                    max={selectedEvent.totalCost}
-                                    step="0.01"
-                                    disabled={isAnyBusy || isCleared}
-                                    value={
-                                      depositDrafts[participant.id] ??
-                                      String(participant.depositPaid)
-                                    }
-                                    onChange={(event) =>
-                                      setDepositDrafts((current) => ({
-                                        ...current,
-                                        [participant.id]:
-                                          event.target.value,
-                                      }))
-                                    }
-                                    className="min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black outline-none focus:border-emerald-400 disabled:opacity-50"
-                                  />
-                                </label>
-                                <button
-                                  type="button"
-                                  disabled={isAnyBusy || isCleared}
-                                  onClick={() =>
-                                    void updateParticipant(
-                                      participant,
-                                      {
-                                        depositPaid: Number(
-                                          depositDrafts[participant.id] ?? 0,
-                                        ),
-                                        depositStatus: "VERIFIED",
-                                      },
-                                      "deposit",
-                                    )
-                                  }
-                                  className="min-h-12 shrink-0 rounded-xl bg-emerald-400 px-3 text-xs font-black text-black disabled:opacity-50"
-                                >
-                                  {participant.depositStatus === "VERIFIED"
-                                    ? "Update deposit"
-                                    : "Verify deposit"}
-                                </button>
-                              </div>
-                              {participant.depositStatus === "VERIFIED" &&
-                              !isCleared ? (
-                                <button
-                                  type="button"
-                                  disabled={isAnyBusy}
-                                  onClick={() =>
-                                    void updateParticipant(
-                                      participant,
-                                      { depositStatus: "PENDING" },
-                                      "deposit",
-                                    )
-                                  }
-                                  className="mt-2 min-h-11 w-full rounded-xl border border-zinc-700 px-3 text-xs font-black text-zinc-300 disabled:opacity-50"
-                                >
-                                  Mark deposit pending
-                                </button>
-                              ) : null}
-
-                              <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
-                                <label className="flex min-h-12 min-w-0 cursor-pointer items-center justify-center rounded-xl border border-zinc-700 px-3 text-center text-xs font-black">
-                                  {busyKey === `proof:${participant.id}`
-                                    ? "Compressing…"
-                                    : participant.paymentProofUrl
-                                      ? "Replace proof"
-                                      : "Upload proof"}
-                                  <input
-                                    type="file"
-                                    accept="image/jpeg,image/png,image/webp"
-                                    className="sr-only"
-                                    disabled={isAnyBusy}
-                                    onChange={(event) =>
-                                      void uploadProof(participant, event)
-                                    }
-                                  />
-                                </label>
-                                {participant.paymentProofUrl ? (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setLightboxUrl(
-                                        participant.paymentProofUrl,
-                                      )
-                                    }
-                                    className="min-h-12 min-w-0 rounded-xl border border-fuchsia-700 bg-fuchsia-950/40 px-3 text-xs font-black text-fuchsia-200"
-                                  >
-                                    View screenshot
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    disabled
-                                    className="min-h-12 min-w-0 rounded-xl border border-zinc-800 px-3 text-xs font-black text-zinc-600"
-                                  >
-                                    No screenshot
-                                  </button>
-                                )}
-                              </div>
-                            </>
-                          )}
-
-                          <div className="mt-3 grid min-w-0 grid-cols-3 gap-2">
-                            {participant.depositStatus === "PENDING" &&
-                            !isCleared ? (
-                              <a
-                                href={whatsappLink(
-                                  participant.phoneNumber,
-                                  depositRequest,
-                                )}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="flex min-h-11 min-w-0 items-center justify-center rounded-xl border border-zinc-700 px-2 text-center text-[10px] font-black"
-                              >
-                                Deposit Request
-                              </a>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled
-                                title={
-                                  isCleared
-                                    ? "The participant is fully cleared."
-                                    : "The deposit has already been received."
-                                }
-                                className="min-h-11 min-w-0 rounded-xl border border-zinc-800 px-2 text-[10px] font-black text-zinc-600"
-                              >
-                                {isCleared ? "Cleared" : "Deposit Received"}
-                              </button>
-                            )}
-                            {participant.depositStatus === "VERIFIED" &&
-                            !isCleared ? (
-                              <a
-                                href={whatsappLink(
-                                  participant.phoneNumber,
-                                  balanceReminder,
-                                )}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="flex min-h-11 min-w-0 items-center justify-center rounded-xl border border-zinc-700 px-2 text-center text-[10px] font-black"
-                              >
-                                Balance Reminder
-                              </a>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled
-                                title={
-                                  isCleared
-                                    ? "The participant is fully cleared."
-                                    : "Verify the deposit before sending a receipt."
-                                }
-                                className="min-h-11 min-w-0 rounded-xl border border-zinc-800 px-2 text-[10px] font-black text-zinc-600"
-                              >
-                                {isCleared ? "Cleared" : "Verify First"}
-                              </button>
-                            )}
-                            {isCleared ? (
-                              <a
-                                href={whatsappLink(
-                                  participant.phoneNumber,
-                                  finalReceipt,
-                                )}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="flex min-h-11 min-w-0 items-center justify-center rounded-xl border border-emerald-800 px-2 text-center text-[10px] font-black text-emerald-300"
-                              >
-                                Final Receipt
-                              </a>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled
-                                title="Clear the remaining balance before sending a final receipt."
-                                className="min-h-11 min-w-0 rounded-xl border border-zinc-800 px-2 text-[10px] font-black text-zinc-600"
-                              >
-                                Clear First
-                              </button>
-                            )}
+                              onClick={() => void clearParticipant(participant)}
+                            className="min-h-7 rounded-md bg-emerald-400 px-1 text-[9px] font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
+                          >
+                              {isBusy ? "…" : isCleared ? "✓" : "Clear"}
+                          </button>
                           </div>
                         </article>
                       );
@@ -1434,139 +1601,278 @@ export function PostRunEventsDashboard() {
             ) : null}
           </>
         )}
+
+        <footer className="py-3 text-center text-[9px] font-black uppercase tracking-[0.16em] text-zinc-700">
+          GlowRunners Post-Run Control · Organiser Only
+        </footer>
       </div>
 
-      {isEventModalOpen ? (
+      {eventModal ? (
         <ModalShell
-          title="Create post-run event"
-          onClose={() => setIsEventModalOpen(false)}
+          title={eventModal === "create" ? "Create event" : "Edit event settings"}
+          onClose={() => setEventModal(null)}
         >
-          <form onSubmit={createEvent} className="mt-4 flex flex-col gap-3">
-            <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
-              Event title
-              <input
-                type="text"
-                required
-                maxLength={100}
-                data-modal-autofocus
-                value={eventForm.title}
-                onChange={(event) =>
-                  setEventForm((current) => ({
-                    ...current,
-                    title: event.target.value,
-                  }))
-                }
-                placeholder="Post-Run Kayaking"
-                className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
-              />
-            </label>
-            <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
-              Associated date
-              <input
-                type="date"
-                required
-                value={eventForm.runDate}
-                onChange={(event) =>
-                  setEventForm((current) => ({
-                    ...current,
-                    runDate: event.target.value,
-                  }))
-                }
-                className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
-              />
-            </label>
-            <div className="grid min-w-0 grid-cols-2 gap-2">
-              <label className="min-w-0 text-xs font-black uppercase tracking-wide text-zinc-400">
-                Total cost
-                <input
-                  type="number"
-                  required
-                  min="0"
-                  step="0.01"
-                  inputMode="decimal"
-                  value={eventForm.totalCost}
-                  onChange={(event) =>
-                    setEventForm((current) => ({
-                      ...current,
-                      totalCost: event.target.value,
-                    }))
-                  }
-                  className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
-                />
-              </label>
-              <label className="min-w-0 text-xs font-black uppercase tracking-wide text-zinc-400">
-                Deposit
-                <input
-                  type="number"
-                  required
-                  min="0"
-                  step="0.01"
-                  inputMode="decimal"
-                  value={eventForm.depositAmount}
-                  onChange={(event) =>
-                    setEventForm((current) => ({
-                      ...current,
-                      depositAmount: event.target.value,
-                    }))
-                  }
-                  className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
-                />
-              </label>
-            </div>
-            <p className="rounded-xl bg-zinc-900 p-3 text-sm font-bold text-zinc-300">
-              Starting balance per participant:{" "}
-              <span className="text-amber-300">
-                {formatMoney(
-                  Math.max(
-                    0,
-                    Number(eventForm.totalCost || 0) -
-                      Number(eventForm.depositAmount || 0),
-                  ),
-                )}
-              </span>
-            </p>
-            <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
-              Max capacity (optional)
-              <input
-                type="number"
-                min="1"
-                step="1"
-                inputMode="numeric"
-                value={eventForm.capacity}
-                onChange={(event) =>
-                  setEventForm((current) => ({
-                    ...current,
-                    capacity: event.target.value,
-                  }))
-                }
-                className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
-              />
-            </label>
-            <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
-              Payment instructions
-              <textarea
-                required
-                maxLength={1000}
-                rows={4}
-                value={eventForm.paymentInstructions}
-                onChange={(event) =>
-                  setEventForm((current) => ({
-                    ...current,
-                    paymentInstructions: event.target.value,
-                  }))
-                }
-                placeholder="InstaPay link or Vodafone Cash number"
-                className="mt-1.5 w-full min-w-0 resize-y rounded-xl border border-zinc-700 bg-black p-3 text-base font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={isAnyBusy || isLoadingEvents}
-              className="min-h-14 w-full rounded-xl bg-fuchsia-500 px-4 text-base font-black text-white disabled:opacity-50"
-            >
-              {busyKey === "create-event" ? "Creating…" : "Create event"}
-            </button>
+          <form onSubmit={eventModal === "create" ? createEvent : editEvent}>
+            <EventFormFields
+              form={eventForm}
+              onChange={setEventForm}
+              isBusy={isAnyBusy}
+              submitLabel={
+                busyKey === "create-event"
+                  ? "Creating…"
+                  : busyKey === "edit-event"
+                    ? "Saving…"
+                    : eventModal === "create"
+                      ? "Create event"
+                      : "Save event settings"
+              }
+            />
           </form>
+        </ModalShell>
+      ) : null}
+
+      {selectedParticipant && selectedEvent ? (
+        <ModalShell
+          title={selectedParticipant.fullName}
+          onClose={() => setSelectedParticipantId("")}
+        >
+          {(() => {
+            const state = paymentState(selectedParticipant, selectedEvent);
+            const depositRequest = `Hi ${selectedParticipant.fullName}! You are registered for ${selectedEvent.title} on ${formatEventDate(
+              selectedEvent.runDate,
+            )}. Total cost: ${formatMoney(
+              selectedEvent.totalCost,
+            )}. Required deposit: ${formatMoney(
+              selectedEvent.depositAmount,
+            )}. Payment instructions: ${selectedEvent.paymentInstructions}`;
+            const balanceNotice = `Hi ${selectedParticipant.fullName}! We received ${formatMoney(
+              state.amountPaid,
+            )} for ${selectedEvent.title}. Your remaining balance due on Friday is ${formatMoney(
+              state.remaining,
+            )}.`;
+            const finalReceipt = `Hi ${selectedParticipant.fullName}! Your payment for ${selectedEvent.title} is fully cleared. Total received: ${formatMoney(
+              state.amountPaid,
+            )}. Remaining balance: 0 EGP. Thank you from GlowRunners!`;
+
+            return (
+              <div className="mt-3 flex min-w-0 flex-col gap-3">
+                <div className="grid min-w-0 grid-cols-3 gap-2 rounded-xl border border-zinc-800 bg-black p-2">
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-black uppercase text-zinc-500">
+                      Status
+                    </p>
+                    <p className="mt-1 truncate text-[10px] font-black">
+                      {state.longLabel}
+                    </p>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-black uppercase text-zinc-500">
+                      Paid
+                    </p>
+                    <p className="mt-1 truncate text-[10px] font-black text-emerald-300">
+                      {formatMoney(state.amountPaid)}
+                    </p>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-black uppercase text-zinc-500">
+                      Owed
+                    </p>
+                    <p className="mt-1 truncate text-[10px] font-black text-amber-300">
+                      {formatMoney(state.remaining)}
+                    </p>
+                  </div>
+                </div>
+
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const amountPaid = Number(paymentDraft);
+
+                    if (!Number.isFinite(amountPaid) || amountPaid < 0) {
+                      setNotice({
+                        tone: "error",
+                        message: "Amount paid must be a non-negative number.",
+                      });
+                      return;
+                    }
+
+                    void updateParticipant(
+                      selectedParticipant,
+                      { amountPaid },
+                      "payment",
+                    ).then((updated) => {
+                      if (updated) {
+                        setPaymentDraft(String(updated.amountPaid));
+                      }
+                    });
+                  }}
+                  className="rounded-xl border border-zinc-800 bg-black p-3"
+                >
+                  <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                    Exact amount paid (EGP)
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      inputMode="decimal"
+                      required
+                      value={paymentDraft}
+                      onChange={(event) => setPaymentDraft(event.target.value)}
+                      className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black outline-none focus:border-emerald-400"
+                    />
+                  </label>
+                  <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
+                    <button
+                      type="submit"
+                      disabled={isAnyBusy}
+                      className="min-h-12 rounded-xl bg-white px-3 text-xs font-black text-black disabled:opacity-50"
+                    >
+                      {busyKey === `payment:${selectedParticipant.id}`
+                        ? "Updating…"
+                        : "Update Payment"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={state.kind === "cleared" || isAnyBusy}
+                      onClick={() =>
+                        void clearParticipant(selectedParticipant)
+                      }
+                      className="min-h-12 rounded-xl bg-emerald-400 px-3 text-xs font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
+                    >
+                      {state.kind === "cleared"
+                        ? "✓ Fully Cleared"
+                        : "Clear Full Balance"}
+                    </button>
+                  </div>
+                </form>
+
+                <div className="grid min-w-0 grid-cols-2 gap-2">
+                  <label className="flex min-h-12 min-w-0 cursor-pointer items-center justify-center rounded-xl border border-zinc-700 px-3 text-center text-xs font-black">
+                    {busyKey === `proof:${selectedParticipant.id}`
+                      ? "Compressing…"
+                      : selectedParticipant.paymentProofUrl
+                        ? "Replace Proof"
+                        : "Upload Proof"}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      className="sr-only"
+                      disabled={isAnyBusy}
+                      onChange={(event) =>
+                        void uploadProof(selectedParticipant, event)
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={!selectedParticipant.paymentProofUrl}
+                    onClick={() =>
+                      setLightboxUrl(selectedParticipant.paymentProofUrl)
+                    }
+                    className="min-h-12 min-w-0 rounded-xl border border-fuchsia-700 bg-fuchsia-950/40 px-3 text-xs font-black text-fuchsia-200 disabled:border-zinc-800 disabled:text-zinc-600"
+                  >
+                    {selectedParticipant.paymentProofUrl
+                      ? "View Screenshot"
+                      : "No Screenshot"}
+                  </button>
+                </div>
+
+                <div className="grid min-w-0 grid-cols-3 gap-2">
+                  <a
+                    href={whatsappLink(
+                      selectedParticipant.phoneNumber,
+                      depositRequest,
+                    )}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex min-h-12 min-w-0 items-center justify-center rounded-xl border border-zinc-700 px-2 text-center text-[10px] font-black"
+                  >
+                    Deposit Request
+                  </a>
+                  <a
+                    href={whatsappLink(
+                      selectedParticipant.phoneNumber,
+                      balanceNotice,
+                    )}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex min-h-12 min-w-0 items-center justify-center rounded-xl border border-amber-800 px-2 text-center text-[10px] font-black text-amber-200"
+                  >
+                    Balance Notice
+                  </a>
+                  <a
+                    href={whatsappLink(
+                      selectedParticipant.phoneNumber,
+                      finalReceipt,
+                    )}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-disabled={state.kind !== "cleared"}
+                    onClick={(event) => {
+                      if (state.kind !== "cleared") {
+                        event.preventDefault();
+                      }
+                    }}
+                    className={`flex min-h-12 min-w-0 items-center justify-center rounded-xl border px-2 text-center text-[10px] font-black ${
+                      state.kind === "cleared"
+                        ? "border-emerald-800 text-emerald-300"
+                        : "border-zinc-800 text-zinc-600"
+                    }`}
+                  >
+                    Final Receipt
+                  </a>
+                </div>
+
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void updateParticipant(
+                      selectedParticipant,
+                      { internalNotes: notesDraft },
+                      "notes",
+                    );
+                  }}
+                  className="rounded-xl border border-zinc-800 bg-black p-3"
+                >
+                  <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                    Internal admin notes
+                    <textarea
+                      maxLength={2000}
+                      rows={3}
+                      value={notesDraft}
+                      onChange={(event) => setNotesDraft(event.target.value)}
+                      placeholder="Private organiser note…"
+                      className="mt-1.5 w-full resize-y rounded-xl border border-zinc-700 bg-zinc-950 p-3 text-base font-bold normal-case tracking-normal outline-none focus:border-fuchsia-400"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={isAnyBusy}
+                    className="mt-2 min-h-11 w-full rounded-xl border border-zinc-700 text-xs font-black disabled:opacity-50"
+                  >
+                    {busyKey === `notes:${selectedParticipant.id}`
+                      ? "Saving…"
+                      : "Save Internal Note"}
+                  </button>
+                </form>
+
+                {isSuperAdmin ? (
+                  <button
+                    type="button"
+                    disabled={isAnyBusy}
+                    onClick={() =>
+                      void deleteParticipant(selectedParticipant)
+                    }
+                    className="min-h-12 w-full rounded-xl border border-red-800 bg-red-950/30 px-4 text-sm font-black text-red-300 disabled:opacity-50"
+                  >
+                    {busyKey === `delete:${selectedParticipant.id}`
+                      ? "Deleting…"
+                      : "🗑️ Delete Participant"}
+                  </button>
+                ) : null}
+              </div>
+            );
+          })()}
         </ModalShell>
       ) : null}
 
@@ -1574,13 +1880,16 @@ export function PostRunEventsDashboard() {
         <ModalShell
           title="Payment proof screenshot"
           onClose={() => setLightboxUrl("")}
+          layer="lightbox"
         >
-          <div className="mt-3 max-h-[78svh] overflow-auto rounded-xl border border-zinc-700 bg-black p-2">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
+          <div className="relative mt-3 h-[72svh] overflow-hidden rounded-xl border border-zinc-700 bg-black">
+            <Image
               src={lightboxUrl}
               alt="Uploaded payment proof"
-              className="h-auto w-full rounded-lg object-contain"
+              fill
+              unoptimized
+              sizes="(max-width: 448px) 100vw, 448px"
+              className="object-contain"
             />
           </div>
         </ModalShell>

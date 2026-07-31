@@ -61,10 +61,16 @@ export async function POST(request: Request) {
         ? String(body.runDate ?? body.run_date)
         : "",
     totalCostPerPersonEgp: toFiniteNumber(
-      body.totalCost ?? body.total_cost,
+      body.totalCost ??
+        body.total_cost ??
+        body.eventTicketPrice ??
+        body.event_ticket_price,
     ),
     requiredDepositPerPersonEgp: toFiniteNumber(
-      body.depositAmount ?? body.deposit_amount,
+      body.depositAmount ??
+        body.deposit_amount ??
+        body.standardDeposit ??
+        body.standard_deposit,
     ),
     maxCapacity:
       capacityValue === null ||

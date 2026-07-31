@@ -32,7 +32,9 @@ export function toEventResponse(event: PostRunEvent) {
     title: event.title,
     runDate: event.associatedDate,
     totalCost: event.totalCostPerPersonEgp,
+    eventTicketPrice: event.totalCostPerPersonEgp,
     depositAmount: event.requiredDepositPerPersonEgp,
+    standardDeposit: event.requiredDepositPerPersonEgp,
     paymentInstructions: event.paymentInstructions,
     capacity: event.maxCapacity,
     createdAt: event.createdAt,
@@ -60,6 +62,7 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     depositStatus:
       participant.depositStatus === "Verified" ? "VERIFIED" : "PENDING",
     depositPaid: participant.depositAmountPaidEgp,
+    amountPaid: participant.depositAmountPaidEgp,
     paymentProofUrl,
     remainingBalance: participant.remainingBalanceEgp,
     settlementStatus:
@@ -70,6 +73,7 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     updatedAt: participant.updatedAt,
     createdByAdmin: participant.createdByAdminPhone,
     updatedByAdmin: participant.updatedByAdminPhone,
+    internalNotes: participant.internalNotes,
   };
 }
 
