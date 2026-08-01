@@ -11,7 +11,6 @@ export const runtime = "nodejs";
 const NO_STORE_HEADERS = { "Cache-Control": "no-store" } as const;
 const ALLOWED_CLIENT_ACTIONS = new Set([
   "CLOSE_GATE_REPORT",
-  "WALK_IN_ADDED",
 ]);
 
 function forbidden() {

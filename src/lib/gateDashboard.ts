@@ -4,7 +4,11 @@ import {
   resolveActiveAttendanceSheetName,
   type AttendanceRosterEntry,
 } from "@/lib/googleSheets";
-import { listGatePayments } from "@/lib/adminOperations";
+import {
+  listGatePayments,
+  listGateWalkIns,
+} from "@/lib/adminOperations";
+import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
 
 const DASHBOARD_CACHE_TTL_MS = 8_000;
 const DASHBOARD_STALE_TTL_MS = 2 * 60_000;
@@ -16,6 +20,7 @@ let dashboardRequest: Promise<GateDashboardData> | undefined;
 export type GateDashboardData = Readonly<{
   sheetName: string;
   isFallbackSheet: boolean;
+  walkInCount: number;
   confirmed: number;
   pending: number;
   total: number;
@@ -26,18 +31,10 @@ export type GateDashboardData = Readonly<{
   roster: AttendanceRosterEntry[];
 }>;
 
-function isConfirmed(status: string): boolean {
-  return status
-    .trim()
-    .toLocaleLowerCase("en-US")
-    .includes("confirmed");
-}
-
 function isCashPayment(method: string): boolean {
   return method
     .trim()
-    .toLocaleLowerCase("en-US")
-    .includes("cash");
+    .toLocaleLowerCase("en-US") === "cash";
 }
 
 export function emptyGateDashboard(
@@ -46,6 +43,7 @@ export function emptyGateDashboard(
   return {
     sheetName,
     isFallbackSheet: false,
+    walkInCount: 0,
     confirmed: 0,
     pending: 0,
     total: 0,
@@ -90,35 +88,61 @@ export function invalidateGateDashboardCache(): void {
 
 async function loadGateDashboardData(): Promise<GateDashboardData> {
   const { sheetName, isFallback } = await resolveActiveAttendanceSheetName();
-  const roster = await getAttendanceRoster(sheetName);
-  const payments = await listGatePayments(sheetName);
-  const confirmed = roster.reduce(
-    (count, runner) => count + (isConfirmed(runner.status) ? 1 : 0),
-    0,
+  const [roster, payments, walkIns] = await Promise.all([
+    getAttendanceRoster(sheetName),
+    listGatePayments(sheetName),
+    listGateWalkIns(sheetName),
+  ]);
+  const confirmedRows = new Set(
+    roster
+      .filter((runner) => isConfirmedAttendanceStatus(runner.status))
+      .map((runner) => runner.rowIndex),
   );
-  const cashInHand = payments.reduce(
+  const seenPaymentRows = new Set<number>();
+  const confirmedPayments = payments.filter((payment) => {
+    if (
+      !confirmedRows.has(payment.runnerRow) ||
+      seenPaymentRows.has(payment.runnerRow)
+    ) {
+      return false;
+    }
+
+    seenPaymentRows.add(payment.runnerRow);
+    return true;
+  });
+  const cashInHand = confirmedPayments.reduce(
     (sum, payment) =>
       sum +
       (isCashPayment(payment.paymentMethod)
         ? payment.amountReceivedEgp
         : 0),
-    0,
+    walkIns.reduce(
+      (sum, walkIn) =>
+        sum +
+        (isCashPayment(walkIn.paymentMethod) ? walkIn.amountPaidEgp : 0),
+      0,
+    ),
   );
-  const digitalRevenue = payments.reduce(
+  const digitalRevenue = confirmedPayments.reduce(
     (sum, payment) =>
       sum +
       (isCashPayment(payment.paymentMethod)
         ? 0
         : payment.amountReceivedEgp),
-    0,
+    walkIns.reduce(
+      (sum, walkIn) =>
+        sum +
+        (isCashPayment(walkIn.paymentMethod) ? 0 : walkIn.amountPaidEgp),
+      0,
+    ),
   );
-  const changeOwed = payments.reduce(
+  const changeOwed = confirmedPayments.reduce(
     (sum, payment) => sum + payment.changeOwedEgp,
-    0,
+    walkIns.reduce((sum, walkIn) => sum + walkIn.changeOwedEgp, 0),
   );
   const owedRunnerRows = [
     ...new Set(
-      payments
+      confirmedPayments
         .filter((payment) => payment.changeOwedEgp > 0)
         .map((payment) => payment.runnerRow),
     ),
@@ -127,9 +151,10 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
   return {
     sheetName,
     isFallbackSheet: isFallback,
-    confirmed,
-    pending: Math.max(0, roster.length - confirmed),
-    total: roster.length,
+    walkInCount: walkIns.length,
+    confirmed: confirmedRows.size + walkIns.length,
+    pending: Math.max(0, roster.length - confirmedRows.size),
+    total: roster.length + walkIns.length,
     cashInHand,
     digitalRevenue,
     changeOwed,

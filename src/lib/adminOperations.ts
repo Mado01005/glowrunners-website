@@ -12,6 +12,7 @@ import {
 
 const ACTIVITY_SHEET = "AdminActivityLog";
 const PAYMENTS_SHEET = "GatePayments";
+const WALK_INS_SHEET = "GateWalkIns";
 const EXPENSES_SHEET = "EventExpenses";
 const LOCKS_SHEET = "RunnerOperationLocks";
 const RUNNER_LOCK_TTL_MS = 2 * 60 * 1_000;
@@ -25,6 +26,9 @@ let activityReadCache:
   | undefined;
 let paymentReadCache:
   | { loadedAt: number; value: GatePayment[] }
+  | undefined;
+let walkInReadCache:
+  | { loadedAt: number; value: GateWalkIn[] }
   | undefined;
 let expenseReadCache:
   | { loadedAt: number; value: EventExpense[] }
@@ -58,6 +62,18 @@ type PaymentColumn =
   | "paymentMethod"
   | "amountDue"
   | "amountReceived"
+  | "changeOwed"
+  | "adminName"
+  | "adminPhone"
+  | "timestamp";
+
+type WalkInColumn =
+  | "id"
+  | "sheetName"
+  | "name"
+  | "phone"
+  | "paymentMethod"
+  | "amountPaid"
   | "changeOwed"
   | "adminName"
   | "adminPhone"
@@ -114,6 +130,19 @@ const PAYMENT_HEADERS: readonly HeaderDefinition<PaymentColumn>[] = [
   { key: "timestamp", header: "Timestamp", aliases: ["Created At"] },
 ];
 
+const WALK_IN_HEADERS: readonly HeaderDefinition<WalkInColumn>[] = [
+  { key: "id", header: "Walk-In ID", aliases: ["Operation ID", "ID"] },
+  { key: "sheetName", header: "Attendance Sheet", aliases: ["Sheet Name"] },
+  { key: "name", header: "Full Name", aliases: ["Name"] },
+  { key: "phone", header: "Phone Number", aliases: ["Phone"] },
+  { key: "paymentMethod", header: "Payment Method", aliases: ["Method"] },
+  { key: "amountPaid", header: "Amount Paid EGP", aliases: ["Amount Paid"] },
+  { key: "changeOwed", header: "Change Owed EGP", aliases: ["Change Owed"] },
+  { key: "adminName", header: "Admin Name" },
+  { key: "adminPhone", header: "Admin Phone" },
+  { key: "timestamp", header: "Timestamp", aliases: ["Created At"] },
+];
+
 const EXPENSE_HEADERS: readonly HeaderDefinition<ExpenseColumn>[] = [
   { key: "id", header: "Expense ID", aliases: ["ID"] },
   { key: "description", header: "Description" },
@@ -157,6 +186,19 @@ export type GatePayment = Readonly<{
   paymentMethod: string;
   amountDueEgp: number;
   amountReceivedEgp: number;
+  changeOwedEgp: number;
+  adminName: string;
+  adminPhone: string;
+  timestamp: string;
+}>;
+
+export type GateWalkIn = Readonly<{
+  id: string;
+  sheetName: string;
+  name: string;
+  phone: string;
+  paymentMethod: string;
+  amountPaidEgp: number;
   changeOwedEgp: number;
   adminName: string;
   adminPhone: string;
@@ -583,6 +625,94 @@ export async function listGatePayments(
           normalizeSheetHeader(payment.sheetName) === normalizedSheet,
       )
     : payments;
+}
+
+export async function recordGateWalkIn(
+  input: Omit<GateWalkIn, "adminName" | "adminPhone" | "timestamp">,
+  admin: AdminIdentity,
+): Promise<GateWalkIn> {
+  const walkIn: GateWalkIn = {
+    ...input,
+    id: safeText(input.id, 100),
+    sheetName: safeText(input.sheetName, 120),
+    name: safeText(input.name, 100),
+    phone: safeText(input.phone, 30),
+    paymentMethod: safeText(input.paymentMethod, 40) || "Cash",
+    amountPaidEgp: safeMoney(input.amountPaidEgp),
+    changeOwedEgp: safeMoney(input.changeOwedEgp),
+    adminName: admin.displayName,
+    adminPhone: admin.phoneE164,
+    timestamp: new Date().toISOString(),
+  };
+
+  await appendUniqueRow(
+    WALK_INS_SHEET,
+    WALK_IN_HEADERS,
+    "id",
+    walkIn.id,
+    {
+      id: walkIn.id,
+      sheetName: walkIn.sheetName,
+      name: walkIn.name,
+      phone: walkIn.phone,
+      paymentMethod: walkIn.paymentMethod,
+      amountPaid: walkIn.amountPaidEgp,
+      changeOwed: walkIn.changeOwedEgp,
+      adminName: walkIn.adminName,
+      adminPhone: walkIn.adminPhone,
+      timestamp: walkIn.timestamp,
+    },
+  );
+  walkInReadCache = undefined;
+
+  return walkIn;
+}
+
+export async function listGateWalkIns(
+  sheetName?: string,
+): Promise<GateWalkIn[]> {
+  const normalizedSheet = normalizeSheetHeader(sheetName ?? "");
+  let walkIns: GateWalkIn[];
+
+  if (
+    walkInReadCache &&
+    Date.now() - walkInReadCache.loadedAt < READ_CACHE_TTL_MS
+  ) {
+    walkIns = walkInReadCache.value;
+  } else {
+    const { columns, rows } = await readRows(
+      WALK_INS_SHEET,
+      WALK_IN_HEADERS,
+    );
+    walkIns = rows
+      .map((row): GateWalkIn | null => {
+        const id = safeText(row[columns.id], 100);
+
+        return id
+          ? {
+              id,
+              sheetName: safeText(row[columns.sheetName], 120),
+              name: safeText(row[columns.name], 100),
+              phone: safeText(row[columns.phone], 30),
+              paymentMethod: safeText(row[columns.paymentMethod], 40),
+              amountPaidEgp: safeMoney(row[columns.amountPaid]),
+              changeOwedEgp: safeMoney(row[columns.changeOwed]),
+              adminName: safeText(row[columns.adminName], 100),
+              adminPhone: safeText(row[columns.adminPhone], 30),
+              timestamp: safeText(row[columns.timestamp], 40),
+            }
+          : null;
+      })
+      .filter((entry): entry is GateWalkIn => entry !== null);
+    walkInReadCache = { loadedAt: Date.now(), value: walkIns };
+  }
+
+  return normalizedSheet
+    ? walkIns.filter(
+        (walkIn) =>
+          normalizeSheetHeader(walkIn.sheetName) === normalizedSheet,
+      )
+    : walkIns;
 }
 
 export async function createEventExpense(

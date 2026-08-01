@@ -21,6 +21,8 @@ function responseBody(
     success: true,
     sheetName: dashboard.sheetName,
     isFallbackSheet: dashboard.isFallbackSheet,
+    walk_in_count: dashboard.walkInCount,
+    walkInCount: dashboard.walkInCount,
     confirmed: dashboard.confirmed,
     pending: dashboard.pending,
     total: dashboard.total,

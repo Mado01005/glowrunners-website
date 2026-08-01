@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getAdminSessionFromRequest } from "@/lib/adminAuth";
+import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
 import {
   recordAdminActivity,
   recordGatePayment,
@@ -210,6 +211,24 @@ export async function POST(request: Request) {
           isFallbackSheet: isFallback,
         },
         { status: 404, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    if (isConfirmedAttendanceStatus(runner.status)) {
+      const confirmedCount = await getConfirmedAttendanceCount(sheetName);
+
+      return NextResponse.json(
+        {
+          success: true,
+          name: runner.fullName,
+          rowIndex: runner.rowIndex,
+          sheetName,
+          confirmedCount,
+          isFallbackSheet: isFallback,
+          operationId,
+          alreadyConfirmed: true,
+        },
+        { headers: NO_STORE_HEADERS },
       );
     }
 

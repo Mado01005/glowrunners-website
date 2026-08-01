@@ -10,6 +10,7 @@ import {
   type FormEvent,
 } from "react";
 import type { Html5Qrcode } from "html5-qrcode";
+import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
 
 type RosterEntry = Readonly<{
   rowIndex: number;
@@ -22,6 +23,7 @@ type RosterEntry = Readonly<{
 type Dashboard = Readonly<{
   sheetName: string;
   isFallbackSheet: boolean;
+  walkInCount: number;
   confirmed: number;
   pending: number;
   total: number;
@@ -91,6 +93,7 @@ type OfflineCheckIn = Readonly<{
 
 type WalkIn = Readonly<{
   id: string;
+  sheetName: string;
   name: string;
   phone: string;
   paymentMethod: "Cash" | "InstaPay";
@@ -108,6 +111,7 @@ type Feedback = Readonly<{
 const INITIAL_DASHBOARD: Dashboard = {
   sheetName: "Loading attendance…",
   isFallbackSheet: false,
+  walkInCount: 0,
   confirmed: 0,
   pending: 0,
   total: 0,
@@ -121,7 +125,6 @@ const INITIAL_DASHBOARD: Dashboard = {
 const SCANNER_ID = "glowrunners-gate-scanner";
 const SESSION_STORAGE_KEY = "glowrunners.admin.identity.v1";
 const OFFLINE_QUEUE_KEY = "glowrunners.admin.offline-checkins.v1";
-const WALK_INS_KEY = "glowrunners.admin.walk-ins.v1";
 const ENTRY_FEE_EGP = 70;
 const WALK_IN_FEE_EGP = ENTRY_FEE_EGP;
 
@@ -163,11 +166,17 @@ function normalizePhone(value: string): string {
 }
 
 function isConfirmed(runner: RosterEntry): boolean {
-  return runner.status.toLocaleLowerCase("en-US").includes("confirmed");
+  return isConfirmedAttendanceStatus(runner.status);
 }
 
 function isCash(method: string): boolean {
-  return method.toLocaleLowerCase("en-US").includes("cash");
+  const normalized = method.trim().toLocaleLowerCase("en-US");
+
+  return (
+    normalized === "cash" ||
+    normalized.includes("cash on the day") ||
+    normalized.includes("cash at the gate")
+  );
 }
 
 function parseRoster(value: unknown): RosterEntry[] {
@@ -231,6 +240,7 @@ function parseDashboard(value: unknown): Dashboard | null {
         ? value.sheetName
         : "Attendance",
     isFallbackSheet: value.isFallbackSheet === true,
+    walkInCount: number("walk_in_count", "walkInCount"),
     confirmed: number("confirmed", "confirmedCount"),
     pending: number("pending", "pendingCount"),
     total: number("total", "totalCount"),
@@ -302,6 +312,7 @@ function parseWalkIn(value: unknown): WalkIn | null {
   if (
     !isRecord(value) ||
     typeof value.id !== "string" ||
+    typeof value.sheetName !== "string" ||
     typeof value.name !== "string" ||
     typeof value.phone !== "string"
   ) {
@@ -310,15 +321,24 @@ function parseWalkIn(value: unknown): WalkIn | null {
 
   return {
     id: value.id.slice(0, 100),
+    sheetName: value.sheetName.trim().slice(0, 120),
     name: value.name.trim().slice(0, 100),
     phone: normalizePhone(value.phone),
     paymentMethod: value.paymentMethod === "InstaPay" ? "InstaPay" : "Cash",
-    amountReceived: WALK_IN_FEE_EGP,
-    changeOwed: 0,
+    amountReceived: Math.max(
+      0,
+      Number(value.amountReceived ?? value.amountPaidEgp) || 0,
+    ),
+    changeOwed: Math.max(
+      0,
+      Number(value.changeOwed ?? value.changeOwedEgp) || 0,
+    ),
     createdAt:
       typeof value.createdAt === "string"
         ? value.createdAt
-        : new Date().toISOString(),
+        : typeof value.timestamp === "string"
+          ? value.timestamp
+          : new Date().toISOString(),
   };
 }
 
@@ -433,7 +453,6 @@ export function GateControlDashboard() {
   >("idle");
   const [scannerKey, setScannerKey] = useState(0);
   const [offlineQueue, setOfflineQueue] = useState<OfflineCheckIn[]>([]);
-  const [walkIns, setWalkIns] = useState<WalkIn[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isActivityLoading, setIsActivityLoading] = useState(false);
@@ -443,6 +462,9 @@ export function GateControlDashboard() {
   const [walkInPhone, setWalkInPhone] = useState("");
   const [walkInMethod, setWalkInMethod] =
     useState<"Cash" | "InstaPay">("Cash");
+  const [walkInAmount, setWalkInAmount] = useState(
+    String(WALK_IN_FEE_EGP),
+  );
   const [expenseDescription, setExpenseDescription] = useState("");
   const [expenseAmount, setExpenseAmount] = useState("");
   const [expenseMethod, setExpenseMethod] =
@@ -658,7 +680,6 @@ export function GateControlDashboard() {
     setOfflineQueue(
       parseStoredArray(OFFLINE_QUEUE_KEY, parseOfflineCheckIn),
     );
-    setWalkIns(parseStoredArray(WALK_INS_KEY, parseWalkIn));
 
     void (async () => {
       try {
@@ -736,14 +757,6 @@ export function GateControlDashboard() {
       });
     }
   }, [offlineQueue]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(WALK_INS_KEY, JSON.stringify(walkIns));
-    } catch {
-      // The action remains logged remotely even if local history is full.
-    }
-  }, [walkIns]);
 
   const syncOfflineQueue = useCallback(async () => {
     if (
@@ -1175,52 +1188,65 @@ export function GateControlDashboard() {
     };
   }, [isScannerEnabled, scannerKey]);
 
+  const queuedPendingItems = useMemo(() => {
+    const confirmedRows = new Set(
+      dashboard.roster
+        .filter(isConfirmed)
+        .map((runner) => runner.rowIndex),
+    );
+    const uniqueByRow = new Map<number, OfflineCheckIn>();
+
+    for (const item of offlineQueue) {
+      if (
+        !confirmedRows.has(item.runnerRow) &&
+        !uniqueByRow.has(item.runnerRow)
+      ) {
+        uniqueByRow.set(item.runnerRow, item);
+      }
+    }
+
+    return [...uniqueByRow.values()];
+  }, [dashboard.roster, offlineQueue]);
   const queuedPhones = useMemo(
-    () => new Set(offlineQueue.map((item) => normalizePhone(item.phone))),
-    [offlineQueue],
-  );
-  const queuedNewCount = useMemo(
     () =>
-      dashboard.roster.filter(
-        (runner) =>
-          queuedPhones.has(normalizePhone(runner.phone)) &&
-          !isConfirmed(runner),
-      ).length,
-    [dashboard.roster, queuedPhones],
+      new Set(
+        queuedPendingItems.map((item) => normalizePhone(item.phone)),
+      ),
+    [queuedPendingItems],
   );
-  const walkInCash = walkIns.reduce(
-    (sum, runner) =>
-      sum + (runner.paymentMethod === "Cash" ? runner.amountReceived : 0),
+  const queuedNewCount = queuedPendingItems.length;
+  const queuedCash = queuedPendingItems.reduce(
+    (sum, item) =>
+      sum + (item.paymentMethod === "Cash" ? item.amountReceived : 0),
     0,
   );
-  const walkInDigital = walkIns.reduce(
-    (sum, runner) =>
-      sum + (runner.paymentMethod === "InstaPay" ? runner.amountReceived : 0),
+  const queuedDigital = queuedPendingItems.reduce(
+    (sum, item) =>
+      sum + (item.paymentMethod === "Cash" ? 0 : item.amountReceived),
     0,
   );
-  const walkInChange = walkIns.reduce(
-    (sum, runner) => sum + runner.changeOwed,
+  const queuedChange = queuedPendingItems.reduce(
+    (sum, item) => sum + item.changeOwed,
     0,
   );
   const totalExpenses = expenses.reduce(
     (sum, expense) => sum + Number(expense.amountEgp || 0),
     0,
   );
-  const displayedConfirmed =
-    dashboard.confirmed + queuedNewCount + walkIns.length;
-  const displayedTotal = dashboard.total + walkIns.length;
+  const displayedConfirmed = dashboard.confirmed + queuedNewCount;
+  const displayedTotal = dashboard.total;
   const displayedPending = Math.max(
     0,
     dashboard.pending - queuedNewCount,
   );
-  const displayedCash = dashboard.cashInHand + walkInCash;
-  const displayedDigital = dashboard.digitalRevenue + walkInDigital;
-  const displayedChange = dashboard.changeOwed + walkInChange;
+  const displayedCash = dashboard.cashInHand + queuedCash;
+  const displayedDigital = dashboard.digitalRevenue + queuedDigital;
+  const displayedChange = dashboard.changeOwed + queuedChange;
   const owedRows = useMemo(
     () => {
       const rows = new Set(dashboard.owedRunnerRows);
 
-      for (const item of offlineQueue) {
+      for (const item of queuedPendingItems) {
         if (item.changeOwed > 0) {
           rows.add(item.runnerRow);
         }
@@ -1228,7 +1254,7 @@ export function GateControlDashboard() {
 
       return rows;
     },
-    [dashboard.owedRunnerRows, offlineQueue],
+    [dashboard.owedRunnerRows, queuedPendingItems],
   );
 
   const filteredRoster = useMemo(() => {
@@ -1282,34 +1308,49 @@ export function GateControlDashboard() {
     event.preventDefault();
     const name = walkInName.trim().slice(0, 100);
     const phone = normalizePhone(walkInPhone);
+    const amountReceived = Number(walkInAmount);
 
-    if (!name || !/^(?:10|11|12|15)\d{8}$/.test(phone)) {
+    if (!name) {
       setFeedback({
         tone: "error",
-        message: "Enter the walk-in runner’s name and Egyptian mobile number.",
+        message: "Enter the walk-in runner’s full name.",
       });
       return;
     }
 
-    const item: WalkIn = {
-      id: crypto.randomUUID(),
-      name,
-      phone,
-      paymentMethod: walkInMethod,
-      amountReceived: WALK_IN_FEE_EGP,
-      changeOwed: 0,
-      createdAt: new Date().toISOString(),
-    };
+    if (phone && !/^(?:10|11|12|15)\d{8}$/.test(phone)) {
+      setFeedback({
+        tone: "error",
+        message: "Enter a valid Egyptian mobile number or leave it blank.",
+      });
+      return;
+    }
+
+    if (
+      !Number.isSafeInteger(amountReceived) ||
+      amountReceived < WALK_IN_FEE_EGP ||
+      amountReceived > 1_000_000
+    ) {
+      setFeedback({
+        tone: "error",
+        message: `Amount received must be a whole number of at least ${money(WALK_IN_FEE_EGP)}.`,
+      });
+      return;
+    }
+
+    const operationId = crypto.randomUUID();
     setIsWalkInSaving(true);
 
     try {
-      const response = await fetch("/api/admin/activity", {
+      const response = await fetch("/api/admin/walk-ins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          actionType: "WALK_IN_ADDED",
-          operationId: `walk-in:${item.id}`,
-          description: `${activeAdmin?.displayName ?? "Admin"} added walk-in Runner: ${name} (${walkInMethod}, ${money(WALK_IN_FEE_EGP)})`,
+          operationId,
+          name,
+          phone,
+          paymentMethod: walkInMethod,
+          amountReceived,
         }),
       });
       const payload = await readJson(response);
@@ -1318,16 +1359,45 @@ export function GateControlDashboard() {
         return;
       }
 
-      if (!response.ok) {
-        throw new Error(readError(payload, "Unable to log this walk-in."));
+      const savedWalkIn =
+        isRecord(payload) && isRecord(payload.walkIn)
+          ? parseWalkIn(payload.walkIn)
+          : null;
+
+      if (!response.ok || savedWalkIn === null) {
+        throw new Error(readError(payload, "Unable to save this walk-in."));
       }
 
-      setWalkIns((current) => [item, ...current].slice(0, 5_000));
+      if (savedWalkIn.sheetName === dashboard.sheetName) {
+        setDashboard((current) => ({
+          ...current,
+          walkInCount: current.walkInCount + 1,
+          confirmed: current.confirmed + 1,
+          total: current.total + 1,
+          cashInHand:
+            current.cashInHand +
+            (savedWalkIn.paymentMethod === "Cash"
+              ? savedWalkIn.amountReceived
+              : 0),
+          digitalRevenue:
+            current.digitalRevenue +
+            (savedWalkIn.paymentMethod === "InstaPay"
+              ? savedWalkIn.amountReceived
+              : 0),
+          changeOwed: current.changeOwed + savedWalkIn.changeOwed,
+        }));
+      }
+
       setWalkInName("");
       setWalkInPhone("");
+      setWalkInAmount(String(WALK_IN_FEE_EGP));
+      const warning =
+        isRecord(payload) && typeof payload.warning === "string"
+          ? ` ${payload.warning}`
+          : "";
       setFeedback({
-        tone: "success",
-        message: `${name} added as a walk-in.`,
+        tone: warning ? "error" : "success",
+        message: `${name} added as a walk-in. Change owed: ${money(savedWalkIn.changeOwed)}.${warning}`,
       });
       void loadActivity();
     } catch (error) {
@@ -1415,9 +1485,13 @@ export function GateControlDashboard() {
     );
     const netCash =
       displayedCash - displayedChange - cashExpenses;
+    const registeredConfirmed = Math.max(
+      0,
+      dashboard.confirmed - dashboard.walkInCount + queuedNewCount,
+    );
     const report = [
       `📊 GlowRunners Meetup Report – ${dateLabels.report}`,
-      `👥 Total Attendees: ${displayedConfirmed} (${dashboard.confirmed + queuedNewCount} Pre-registered, ${walkIns.length} Walk-ins)`,
+      `👥 Total Attendees: ${displayedConfirmed} (${registeredConfirmed} Pre-registered, ${dashboard.walkInCount} Walk-ins)`,
       `💵 Total Cash Collected: ${money(displayedCash)}`,
       `💳 Digital Revenue: ${money(displayedDigital)}`,
       `📉 Total Expenses: ${money(totalExpenses)}`,
@@ -1476,6 +1550,14 @@ export function GateControlDashboard() {
     paymentDraft?.paymentMethod === "Cash" && paymentDifference > 0
       ? paymentDifference
       : 0;
+  const walkInReceivedAmount = Number(walkInAmount);
+  const hasValidWalkInAmount =
+    Number.isSafeInteger(walkInReceivedAmount) &&
+    walkInReceivedAmount >= WALK_IN_FEE_EGP &&
+    walkInReceivedAmount <= 1_000_000;
+  const walkInChange = hasValidWalkInAmount
+    ? walkInReceivedAmount - WALK_IN_FEE_EGP
+    : 0;
 
   return (
     <div className="flex min-h-screen w-full flex-col items-center justify-start overflow-x-hidden bg-[#0d0d0d] px-4 text-white">
@@ -1796,7 +1878,7 @@ export function GateControlDashboard() {
               />
             </label>
             <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
-              PHONE NUMBER
+              PHONE NUMBER <span className="text-zinc-600">(OPTIONAL)</span>
               <input
                 value={walkInPhone}
                 onChange={(event) => setWalkInPhone(event.target.value)}
@@ -1820,14 +1902,64 @@ export function GateControlDashboard() {
                 <option>InstaPay</option>
               </select>
             </label>
+            <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+              AMOUNT RECEIVED (EGP)
+              <input
+                value={walkInAmount}
+                onChange={(event) => setWalkInAmount(event.target.value)}
+                type="number"
+                inputMode="numeric"
+                min={WALK_IN_FEE_EGP}
+                max={1_000_000}
+                step={1}
+                className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-orange-400"
+              />
+            </label>
+            <div
+              aria-label="Quick walk-in cash amounts"
+              className="grid min-w-0 grid-cols-3 gap-2"
+            >
+              {[70, 100, 200].map((amount) => (
+                <button
+                  key={amount}
+                  type="button"
+                  onClick={() => setWalkInAmount(String(amount))}
+                  className={`min-h-11 min-w-0 rounded-xl border px-2 text-xs font-black ${
+                    walkInReceivedAmount === amount
+                      ? "border-orange-300 bg-orange-400 text-black"
+                      : "border-white/10 bg-black text-zinc-300"
+                  }`}
+                >
+                  {amount} EGP
+                </button>
+              ))}
+            </div>
+            <p
+              role="status"
+              className={`rounded-xl border px-3 py-2 text-center text-xs font-black ${
+                !hasValidWalkInAmount
+                  ? "border-amber-400/20 bg-amber-400/[0.08] text-amber-200"
+                  : walkInChange > 0
+                    ? "border-red-400/20 bg-red-400/[0.08] text-red-300"
+                    : "border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300"
+              }`}
+            >
+              {!hasValidWalkInAmount
+                ? `Enter at least ${money(WALK_IN_FEE_EGP)}`
+                : walkInChange > 0
+                  ? `🔴 RETURN CHANGE TO RUNNER: ${money(walkInChange)}`
+                  : "🟢 EXACT AMOUNT"}
+            </p>
             <button
               type="submit"
-              disabled={isWalkInSaving}
+              disabled={isWalkInSaving || !hasValidWalkInAmount}
               className="min-h-12 w-full rounded-xl bg-orange-500 px-4 text-sm font-black text-black disabled:opacity-60"
             >
               {isWalkInSaving
                 ? "Saving…"
-                : `+ Confirm Walk-In · ${money(WALK_IN_FEE_EGP)}`}
+                : walkInChange > 0
+                  ? `+ Confirm Walk-In · Return ${money(walkInChange)} Change`
+                  : `+ Confirm Walk-In · Exact ${money(WALK_IN_FEE_EGP)}`}
             </button>
           </form>
         </details>

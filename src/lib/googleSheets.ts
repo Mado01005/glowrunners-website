@@ -1,5 +1,6 @@
 import type { JWTInput } from "google-auth-library";
 import { google, type sheets_v4 } from "googleapis";
+import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
 
 const DEFAULT_SPREADSHEET_ID =
   "1MJApZDOATx8vZUGKBtaHOFnIo831lSZJHl8KUJEaguM";
@@ -939,10 +940,7 @@ export async function getConfirmedAttendanceCount(
   const startIndex = columns.hasHeaderRow ? 1 : 0;
 
   return rows.slice(startIndex).reduce((count, row) => {
-    return String(row[columns.status] ?? "")
-      .trim()
-      .toLocaleLowerCase("en-US")
-      .includes("confirmed")
+    return isConfirmedAttendanceStatus(row[columns.status])
       ? count + 1
       : count;
   }, 0);
