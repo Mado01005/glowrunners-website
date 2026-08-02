@@ -1188,6 +1188,14 @@ export function GateControlDashboard() {
     };
   }, [isScannerEnabled, scannerKey]);
 
+  const walkInReceivedAmount = Number(walkInAmount);
+  const hasValidWalkInAmount =
+    Number.isSafeInteger(walkInReceivedAmount) &&
+    walkInReceivedAmount >= WALK_IN_FEE_EGP &&
+    walkInReceivedAmount <= 1_000_000;
+  const walkInChange = hasValidWalkInAmount
+    ? walkInReceivedAmount - WALK_IN_FEE_EGP
+    : 0;
   const queuedPendingItems = useMemo(() => {
     const confirmedRows = new Set(
       dashboard.roster
@@ -1241,7 +1249,7 @@ export function GateControlDashboard() {
   );
   const displayedCash = dashboard.cashInHand + queuedCash;
   const displayedDigital = dashboard.digitalRevenue + queuedDigital;
-  const displayedChange = dashboard.changeOwed + queuedChange;
+  const displayedChange = dashboard.changeOwed + queuedChange + walkInChange;
   const owedRows = useMemo(
     () => {
       const rows = new Set(dashboard.owedRunnerRows);
@@ -1550,15 +1558,6 @@ export function GateControlDashboard() {
     paymentDraft?.paymentMethod === "Cash" && paymentDifference > 0
       ? paymentDifference
       : 0;
-  const walkInReceivedAmount = Number(walkInAmount);
-  const hasValidWalkInAmount =
-    Number.isSafeInteger(walkInReceivedAmount) &&
-    walkInReceivedAmount >= WALK_IN_FEE_EGP &&
-    walkInReceivedAmount <= 1_000_000;
-  const walkInChange = hasValidWalkInAmount
-    ? walkInReceivedAmount - WALK_IN_FEE_EGP
-    : 0;
-
   return (
     <div className="flex min-h-screen w-full flex-col items-center justify-start overflow-x-hidden bg-[#0d0d0d] px-4 text-white">
       <main className="flex w-full max-w-md min-w-0 flex-col gap-4 py-4 pb-10">
