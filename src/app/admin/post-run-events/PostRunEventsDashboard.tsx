@@ -39,6 +39,9 @@ type PostRunEvent = Readonly<{
   createdAt: string;
   updatedAt: string;
   createdByAdmin?: string;
+  isArchived: boolean;
+  archivedAt: string | null;
+  archivedByAdmin?: string | null;
 }>;
 
 type Participant = Readonly<{
@@ -533,6 +536,7 @@ export function PostRunEventsDashboard() {
   const [admin, setAdmin] = useState<ActiveAdmin | null>(null);
   const [events, setEvents] = useState<PostRunEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState("");
+  const [showArchivedEvents, setShowArchivedEvents] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [eventModal, setEventModal] = useState<EventModal>(null);
   const [eventForm, setEventForm] =
@@ -547,6 +551,8 @@ export function PostRunEventsDashboard() {
     useState<PaymentFilter>("all");
   const [search, setSearch] = useState("");
   const [lightboxUrl, setLightboxUrl] = useState("");
+  const [deleteEventCandidate, setDeleteEventCandidate] =
+    useState<PostRunEvent | null>(null);
   const [busyKey, setBusyKey] = useState("");
   const [isLoadingEvents, setIsLoadingEvents] = useState(true);
   const [isLoadingParticipants, setIsLoadingParticipants] = useState(false);
@@ -564,7 +570,16 @@ export function PostRunEventsDashboard() {
       (participant) => participant.id === selectedParticipantId,
     ) ?? null;
   const isSuperAdmin = admin?.role === "super-admin";
+  const isSelectedEventArchived = selectedEvent?.isArchived ?? false;
   const isAnyBusy = busyKey.length > 0;
+  const activeEvents = useMemo(
+    () => events.filter((event) => !event.isArchived),
+    [events],
+  );
+  const archivedEvents = useMemo(
+    () => events.filter((event) => event.isArchived),
+    [events],
+  );
 
   const loadSession = useCallback(async () => {
     const { response, payload } = await apiRequest("/api/auth/session");
@@ -585,11 +600,13 @@ export function PostRunEventsDashboard() {
     );
   }, []);
 
-  const loadEvents = useCallback(async () => {
+  const loadEvents = useCallback(async (includeArchived = false) => {
     setIsLoadingEvents(true);
 
     try {
-      const { response, payload } = await apiRequest("/api/events");
+      const { response, payload } = await apiRequest(
+        includeArchived ? "/api/events?includeArchived=true" : "/api/events",
+      );
 
       if (
         !response.ok ||
@@ -657,15 +674,17 @@ export function PostRunEventsDashboard() {
   }, []);
 
   useEffect(() => {
-    void Promise.all([loadSession(), loadEvents()]).catch((error: unknown) => {
-      setNotice({
-        tone: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "The event manager could not be loaded.",
-      });
-    });
+    void Promise.all([loadSession(), loadEvents(false)]).catch(
+      (error: unknown) => {
+        setNotice({
+          tone: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "The event manager could not be loaded.",
+        });
+      },
+    );
   }, [loadEvents, loadSession]);
 
   useEffect(() => {
@@ -723,7 +742,7 @@ export function PostRunEventsDashboard() {
   };
 
   const openEditEvent = () => {
-    if (!selectedEvent || !isSuperAdmin) {
+    if (!selectedEvent || !isSuperAdmin || selectedEvent.isArchived) {
       return;
     }
 
@@ -847,39 +866,65 @@ export function PostRunEventsDashboard() {
     }
   };
 
-  const archiveEvent = async () => {
+  const setEventArchived = async (shouldArchive: boolean) => {
     if (
       !selectedEvent ||
       !isSuperAdmin ||
       activeOperationRef.current ||
-      !window.confirm(
-        `Archive "${selectedEvent.title}"? It will leave the active event list but remain in the audit ledger.`,
-      )
+      selectedEvent.isArchived === shouldArchive
     ) {
       return;
     }
 
     activeOperationRef.current = true;
-    setBusyKey("archive-event");
+    setBusyKey(shouldArchive ? "archive-event" : "unarchive-event");
 
     try {
       const { response, payload } = await apiRequest(
         `/api/events/${encodeURIComponent(selectedEvent.id)}`,
-        { method: "DELETE" },
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isArchived: shouldArchive }),
+        },
       );
 
-      if (!response.ok) {
-        throw new Error(readError(payload, "The event could not be archived."));
+      if (!response.ok || !isObject(payload) || !isObject(payload.event)) {
+        throw new Error(
+          readError(
+            payload,
+            shouldArchive
+              ? "The event could not be archived."
+              : "The event could not be unarchived.",
+          ),
+        );
       }
 
-      const remainingEvents = events.filter(
-        (candidate) => candidate.id !== selectedEvent.id,
+      const updated = payload.event as PostRunEvent;
+      const nextEvents = shouldArchive
+        ? showArchivedEvents
+          ? events.map((candidate) =>
+              candidate.id === updated.id ? updated : candidate,
+            )
+          : events.filter((candidate) => candidate.id !== updated.id)
+        : events.map((candidate) =>
+            candidate.id === updated.id ? updated : candidate,
+          );
+      const nextActiveEvent = nextEvents.find(
+        (candidate) => !candidate.isArchived && candidate.id !== updated.id,
       );
-      setEvents(remainingEvents);
-      setSelectedEventId(remainingEvents[0]?.id ?? "");
+      setEvents(nextEvents);
+      setSelectedEventId(
+        shouldArchive
+          ? (nextActiveEvent?.id ??
+              (showArchivedEvents ? updated.id : ""))
+          : updated.id,
+      );
       setNotice({
         tone: "success",
-        message: `${selectedEvent.title} was archived.`,
+        message: `${selectedEvent.title} was ${
+          shouldArchive ? "archived" : "unarchived"
+        }.`,
       });
     } catch (error) {
       setNotice({
@@ -887,7 +932,79 @@ export function PostRunEventsDashboard() {
         message:
           error instanceof Error
             ? error.message
-            : "The event could not be archived.",
+            : shouldArchive
+              ? "The event could not be archived."
+              : "The event could not be unarchived.",
+      });
+    } finally {
+      activeOperationRef.current = false;
+      setBusyKey("");
+    }
+  };
+
+  const toggleArchivedEvents = async (nextValue: boolean) => {
+    if (!isSuperAdmin || activeOperationRef.current) {
+      return;
+    }
+
+    setShowArchivedEvents(nextValue);
+
+    try {
+      await loadEvents(nextValue);
+    } catch (error) {
+      setShowArchivedEvents(!nextValue);
+      setNotice({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Archived events could not be loaded.",
+      });
+    }
+  };
+
+  const permanentlyDeleteEvent = async () => {
+    const candidate = deleteEventCandidate;
+
+    if (!candidate || !isSuperAdmin || activeOperationRef.current) {
+      return;
+    }
+
+    activeOperationRef.current = true;
+    setBusyKey("delete-event");
+
+    try {
+      const { response, payload } = await apiRequest(
+        `/api/events/${encodeURIComponent(candidate.id)}`,
+        { method: "DELETE" },
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          readError(payload, "The event could not be permanently deleted."),
+        );
+      }
+
+      const remainingEvents = events.filter(
+        (event) => event.id !== candidate.id,
+      );
+      const nextEvent =
+        remainingEvents.find((event) => !event.isArchived) ??
+        (showArchivedEvents ? remainingEvents[0] : undefined);
+      setEvents(remainingEvents);
+      setSelectedEventId(nextEvent?.id ?? "");
+      setDeleteEventCandidate(null);
+      setNotice({
+        tone: "success",
+        message: `${candidate.title} and its participant ledger were permanently deleted.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The event could not be permanently deleted.",
       });
     } finally {
       activeOperationRef.current = false;
@@ -900,6 +1017,7 @@ export function PostRunEventsDashboard() {
 
     if (
       !selectedEvent ||
+      selectedEvent.isArchived ||
       isLoadingParticipants ||
       activeOperationRef.current
     ) {
@@ -956,7 +1074,11 @@ export function PostRunEventsDashboard() {
       patch: ParticipantPatch,
       action: string,
     ): Promise<Participant | null> => {
-      if (!selectedEvent || activeOperationRef.current) {
+      if (
+        !selectedEvent ||
+        selectedEvent.isArchived ||
+        activeOperationRef.current
+      ) {
         return null;
       }
 
@@ -1047,7 +1169,7 @@ export function PostRunEventsDashboard() {
   );
 
   const clearParticipant = async (participant: Participant) => {
-    if (!selectedEvent) {
+    if (!selectedEvent || selectedEvent.isArchived) {
       return;
     }
 
@@ -1069,7 +1191,7 @@ export function PostRunEventsDashboard() {
     const file = event.target.files?.[0];
     event.target.value = "";
 
-    if (!file || activeOperationRef.current) {
+    if (!file || selectedEvent?.isArchived || activeOperationRef.current) {
       return;
     }
 
@@ -1122,6 +1244,7 @@ export function PostRunEventsDashboard() {
   const deleteParticipant = async (participant: Participant) => {
     if (
       !selectedEvent ||
+      selectedEvent.isArchived ||
       !isSuperAdmin ||
       activeOperationRef.current ||
       !window.confirm(
@@ -1297,10 +1420,27 @@ export function PostRunEventsDashboard() {
           </section>
         ) : events.length === 0 ? (
           <section className="rounded-2xl border border-dashed border-zinc-700 bg-zinc-950 p-6 text-center">
-            <h2 className="text-lg font-black">No active events</h2>
+            <h2 className="text-lg font-black">No events found</h2>
             <p className="mt-2 text-sm font-semibold text-zinc-400">
-              Create the next post-run activity and start its ledger.
+              {showArchivedEvents
+                ? "There are no active or archived post-run events."
+                : "Create the next post-run activity or show archived history."}
             </p>
+            {isSuperAdmin ? (
+              <label className="mt-4 flex min-h-11 w-full cursor-pointer items-center justify-between rounded-xl border border-amber-800/70 bg-amber-950/20 px-3 text-left text-xs font-black text-amber-200">
+                <span>Show Archived Events</span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={showArchivedEvents}
+                  disabled={isAnyBusy}
+                  onChange={(event) =>
+                    void toggleArchivedEvents(event.target.checked)
+                  }
+                  className="h-5 w-5 accent-amber-400"
+                />
+              </label>
+            ) : null}
             <button
               type="button"
               onClick={openCreateEvent}
@@ -1313,18 +1453,36 @@ export function PostRunEventsDashboard() {
           <>
             <section className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2">
               <label className="min-w-0">
-                <span className="sr-only">Active event</span>
+                <span className="sr-only">Selected event</span>
                 <select
                   value={selectedEventId}
                   disabled={isAnyBusy}
                   onChange={(event) => setSelectedEventId(event.target.value)}
                   className="min-h-11 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-sm font-black text-white outline-none focus:border-fuchsia-400"
                 >
-                  {events.map((event) => (
-                    <option value={event.id} key={event.id}>
-                      {event.title} · {formatEventDate(event.runDate)}
-                    </option>
-                  ))}
+                  {activeEvents.length > 0 ? (
+                    <optgroup label="Active Events">
+                      {activeEvents.map((event) => (
+                        <option value={event.id} key={event.id}>
+                          {event.title} · {formatEventDate(event.runDate)}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
+                  {showArchivedEvents && archivedEvents.length > 0 ? (
+                    <optgroup label="Archived Events">
+                      {archivedEvents.map((event) => (
+                        <option
+                          value={event.id}
+                          key={event.id}
+                          className="text-zinc-500"
+                        >
+                          📦 ARCHIVED · {event.title} ·{" "}
+                          {formatEventDate(event.runDate)}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : null}
                 </select>
               </label>
               <button
@@ -1335,25 +1493,59 @@ export function PostRunEventsDashboard() {
               >
                 + Event
               </button>
+              {isSuperAdmin ? (
+                <label className="col-span-2 flex min-h-11 cursor-pointer items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 text-xs font-black text-zinc-300">
+                  <span>Show Archived Events</span>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={showArchivedEvents}
+                    disabled={isAnyBusy}
+                    onChange={(event) =>
+                      void toggleArchivedEvents(event.target.checked)
+                    }
+                    className="h-5 w-5 accent-amber-400"
+                  />
+                </label>
+              ) : null}
             </section>
 
             {selectedEvent ? (
               <>
-                <section className="min-w-0 rounded-xl border border-fuchsia-900/70 bg-fuchsia-950/25 px-3 py-2">
+                <section
+                  className={`min-w-0 rounded-xl border px-3 py-2 ${
+                    isSelectedEventArchived
+                      ? "border-zinc-700 bg-zinc-900/70"
+                      : "border-fuchsia-900/70 bg-fuchsia-950/25"
+                  }`}
+                >
                   <div className="flex min-w-0 items-center justify-between gap-2">
                     <div className="min-w-0">
                       <h2 className="truncate text-base font-black">
                         {selectedEvent.title}
                       </h2>
-                      <p className="truncate text-[11px] font-bold text-fuchsia-200">
+                      <p
+                        className={`truncate text-[11px] font-bold ${
+                          isSelectedEventArchived
+                            ? "text-zinc-400"
+                            : "text-fuchsia-200"
+                        }`}
+                      >
                         {formatEventDate(selectedEvent.runDate)} · Ticket{" "}
                         {formatMoney(selectedEvent.totalCost)} · Deposit{" "}
                         {formatMoney(selectedEvent.depositAmount)}
                       </p>
                     </div>
-                    <span className="shrink-0 rounded-full bg-black/60 px-2 py-1 text-[10px] font-black">
-                      {participants.length}/{selectedEvent.capacity ?? "∞"}
-                    </span>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      {isSelectedEventArchived ? (
+                        <span className="rounded-full bg-zinc-700 px-2 py-1 text-[8px] font-black text-zinc-200">
+                          📦 ARCHIVED
+                        </span>
+                      ) : null}
+                      <span className="rounded-full bg-black/60 px-2 py-1 text-[10px] font-black">
+                        {participants.length}/{selectedEvent.capacity ?? "∞"}
+                      </span>
+                    </div>
                   </div>
                 </section>
 
@@ -1393,14 +1585,20 @@ export function PostRunEventsDashboard() {
                       Event Options &amp; Settings
                     </h2>
                     <span className="text-[9px] font-bold text-zinc-600">
-                      {isSuperAdmin ? "SUPER ADMIN" : "READ ONLY"}
+                      {isSelectedEventArchived
+                        ? "ARCHIVED · READ ONLY"
+                        : isSuperAdmin
+                          ? "SUPER ADMIN"
+                          : "READ ONLY"}
                     </span>
                   </div>
-                  <div className="grid min-w-0 grid-cols-3 gap-2">
+                  <div className="grid min-w-0 grid-cols-2 gap-2">
                     <button
                       type="button"
                       onClick={openEditEvent}
-                      disabled={!isSuperAdmin || isAnyBusy}
+                      disabled={
+                        !isSuperAdmin || isSelectedEventArchived || isAnyBusy
+                      }
                       className="min-h-11 min-w-0 rounded-lg border border-zinc-700 px-2 text-[10px] font-black disabled:text-zinc-600"
                     >
                       Edit Event
@@ -1415,24 +1613,48 @@ export function PostRunEventsDashboard() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => void archiveEvent()}
+                      onClick={() =>
+                        void setEventArchived(!isSelectedEventArchived)
+                      }
                       disabled={!isSuperAdmin || isAnyBusy}
-                      className="min-h-11 min-w-0 rounded-lg border border-red-900 px-2 text-[10px] font-black text-red-300 disabled:text-zinc-600"
+                      className="min-h-11 min-w-0 rounded-lg border border-amber-700 bg-amber-950/30 px-2 text-[10px] font-black text-amber-200 disabled:text-zinc-600"
                     >
-                      Archive
+                      {busyKey === "archive-event"
+                        ? "Archiving…"
+                        : busyKey === "unarchive-event"
+                          ? "Unarchiving…"
+                          : isSelectedEventArchived
+                            ? "📦 Unarchive"
+                            : "📦 Archive Event"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDeleteEventCandidate(selectedEvent)}
+                      disabled={!isSuperAdmin || isAnyBusy}
+                      className="min-h-11 min-w-0 rounded-lg border border-red-800 bg-gradient-to-r from-red-950 to-red-900/60 px-2 text-[10px] font-black text-red-200 disabled:text-zinc-600"
+                    >
+                      🗑️ Delete Event
                     </button>
                   </div>
                 </section>
 
-                <details className="group min-w-0 rounded-xl border border-zinc-800 bg-zinc-950">
-                  <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between px-3 text-xs font-black">
-                    <span>+ ADD PARTICIPANT</span>
-                    <span className="text-zinc-500 group-open:rotate-45">+</span>
-                  </summary>
-                  <form
-                    onSubmit={addParticipant}
-                    className="grid min-w-0 grid-cols-1 gap-2 border-t border-zinc-800 p-3 sm:grid-cols-2"
-                  >
+                {isSelectedEventArchived ? (
+                  <section className="rounded-xl border border-amber-800/60 bg-amber-950/20 px-3 py-2 text-xs font-bold text-amber-200">
+                    📦 Historical ledger is read-only. Unarchive this event to
+                    add participants or change payments.
+                  </section>
+                ) : (
+                  <details className="group min-w-0 rounded-xl border border-zinc-800 bg-zinc-950">
+                    <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between px-3 text-xs font-black">
+                      <span>+ ADD PARTICIPANT</span>
+                      <span className="text-zinc-500 group-open:rotate-45">
+                        +
+                      </span>
+                    </summary>
+                    <form
+                      onSubmit={addParticipant}
+                      className="grid min-w-0 grid-cols-1 gap-2 border-t border-zinc-800 p-3 sm:grid-cols-2"
+                    >
                     <input
                       type="text"
                       required
@@ -1479,8 +1701,9 @@ export function PostRunEventsDashboard() {
                         ? "Adding…"
                         : "Add participant"}
                     </button>
-                  </form>
-                </details>
+                    </form>
+                  </details>
+                )}
 
                 <section className="min-w-0">
                   <div
@@ -1585,7 +1808,11 @@ export function PostRunEventsDashboard() {
                             </span>
                             <button
                               type="button"
-                              disabled={isCleared || isAnyBusy}
+                              disabled={
+                                isSelectedEventArchived ||
+                                isCleared ||
+                                isAnyBusy
+                              }
                               onClick={() => void clearParticipant(participant)}
                             className="min-h-7 rounded-md bg-emerald-400 px-1 text-[9px] font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
                           >
@@ -1628,6 +1855,49 @@ export function PostRunEventsDashboard() {
               }
             />
           </form>
+        </ModalShell>
+      ) : null}
+
+      {deleteEventCandidate ? (
+        <ModalShell
+          title="Permanently Delete Event?"
+          onClose={() => {
+            if (busyKey !== "delete-event") {
+              setDeleteEventCandidate(null);
+            }
+          }}
+        >
+          <div className="mt-4 flex min-w-0 flex-col gap-4">
+            <p className="text-sm font-semibold leading-6 text-zinc-300">
+              Are you sure you want to delete{" "}
+              <strong className="text-white">
+                &quot;{deleteEventCandidate.title}&quot;
+              </strong>
+              ? This will permanently remove the event and all associated
+              participant records. This action cannot be undone.
+            </p>
+            <div className="grid min-w-0 grid-cols-2 gap-2">
+              <button
+                type="button"
+                data-modal-autofocus
+                disabled={busyKey === "delete-event"}
+                onClick={() => setDeleteEventCandidate(null)}
+                className="min-h-12 min-w-0 rounded-xl border border-zinc-700 px-3 text-sm font-black disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busyKey === "delete-event"}
+                onClick={() => void permanentlyDeleteEvent()}
+                className="min-h-12 min-w-0 rounded-xl bg-red-600 px-3 text-sm font-black text-white disabled:opacity-50"
+              >
+                {busyKey === "delete-event"
+                  ? "Deleting…"
+                  : "🗑️ Confirm Delete"}
+              </button>
+            </div>
+          </div>
         </ModalShell>
       ) : null}
 
@@ -1683,31 +1953,32 @@ export function PostRunEventsDashboard() {
                   </div>
                 </div>
 
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    const amountPaid = Number(paymentDraft);
+                {!isSelectedEventArchived ? (
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const amountPaid = Number(paymentDraft);
 
-                    if (!Number.isFinite(amountPaid) || amountPaid < 0) {
-                      setNotice({
-                        tone: "error",
-                        message: "Amount paid must be a non-negative number.",
-                      });
-                      return;
-                    }
-
-                    void updateParticipant(
-                      selectedParticipant,
-                      { amountPaid },
-                      "payment",
-                    ).then((updated) => {
-                      if (updated) {
-                        setPaymentDraft(String(updated.amountPaid));
+                      if (!Number.isFinite(amountPaid) || amountPaid < 0) {
+                        setNotice({
+                          tone: "error",
+                          message: "Amount paid must be a non-negative number.",
+                        });
+                        return;
                       }
-                    });
-                  }}
-                  className="rounded-xl border border-zinc-800 bg-black p-3"
-                >
+
+                      void updateParticipant(
+                        selectedParticipant,
+                        { amountPaid },
+                        "payment",
+                      ).then((updated) => {
+                        if (updated) {
+                          setPaymentDraft(String(updated.amountPaid));
+                        }
+                      });
+                    }}
+                    className="rounded-xl border border-zinc-800 bg-black p-3"
+                  >
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
                     Exact amount paid (EGP)
                     <input
@@ -1744,25 +2015,32 @@ export function PostRunEventsDashboard() {
                         : "Clear Full Balance"}
                     </button>
                   </div>
-                </form>
+                  </form>
+                ) : null}
 
                 <div className="grid min-w-0 grid-cols-2 gap-2">
-                  <label className="flex min-h-12 min-w-0 cursor-pointer items-center justify-center rounded-xl border border-zinc-700 px-3 text-center text-xs font-black">
-                    {busyKey === `proof:${selectedParticipant.id}`
-                      ? "Compressing…"
-                      : selectedParticipant.paymentProofUrl
-                        ? "Replace Proof"
-                        : "Upload Proof"}
-                    <input
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp"
-                      className="sr-only"
-                      disabled={isAnyBusy}
-                      onChange={(event) =>
-                        void uploadProof(selectedParticipant, event)
-                      }
-                    />
-                  </label>
+                  {isSelectedEventArchived ? (
+                    <div className="flex min-h-12 min-w-0 items-center justify-center rounded-xl border border-zinc-800 px-3 text-center text-xs font-black text-zinc-500">
+                      Read-only proof
+                    </div>
+                  ) : (
+                    <label className="flex min-h-12 min-w-0 cursor-pointer items-center justify-center rounded-xl border border-zinc-700 px-3 text-center text-xs font-black">
+                      {busyKey === `proof:${selectedParticipant.id}`
+                        ? "Compressing…"
+                        : selectedParticipant.paymentProofUrl
+                          ? "Replace Proof"
+                          : "Upload Proof"}
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        className="sr-only"
+                        disabled={isAnyBusy}
+                        onChange={(event) =>
+                          void uploadProof(selectedParticipant, event)
+                        }
+                      />
+                    </label>
+                  )}
                   <button
                     type="button"
                     disabled={!selectedParticipant.paymentProofUrl}
@@ -1823,17 +2101,18 @@ export function PostRunEventsDashboard() {
                   </a>
                 </div>
 
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void updateParticipant(
-                      selectedParticipant,
-                      { internalNotes: notesDraft },
-                      "notes",
-                    );
-                  }}
-                  className="rounded-xl border border-zinc-800 bg-black p-3"
-                >
+                {!isSelectedEventArchived ? (
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void updateParticipant(
+                        selectedParticipant,
+                        { internalNotes: notesDraft },
+                        "notes",
+                      );
+                    }}
+                    className="rounded-xl border border-zinc-800 bg-black p-3"
+                  >
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
                     Internal admin notes
                     <textarea
@@ -1854,9 +2133,19 @@ export function PostRunEventsDashboard() {
                       ? "Saving…"
                       : "Save Internal Note"}
                   </button>
-                </form>
+                  </form>
+                ) : selectedParticipant.internalNotes ? (
+                  <div className="rounded-xl border border-zinc-800 bg-black p-3">
+                    <p className="text-[10px] font-black uppercase tracking-wide text-zinc-500">
+                      Internal admin notes
+                    </p>
+                    <p className="mt-2 whitespace-pre-wrap text-sm font-semibold text-zinc-300">
+                      {selectedParticipant.internalNotes}
+                    </p>
+                  </div>
+                ) : null}
 
-                {isSuperAdmin ? (
+                {isSuperAdmin && !isSelectedEventArchived ? (
                   <button
                     type="button"
                     disabled={isAnyBusy}

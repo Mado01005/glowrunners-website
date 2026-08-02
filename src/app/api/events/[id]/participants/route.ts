@@ -35,7 +35,9 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const participants = await listEventParticipants(id);
+    const participants = await listEventParticipants(id, {
+      includeArchived: session.admin.role === "super-admin",
+    });
 
     return NextResponse.json(
       {

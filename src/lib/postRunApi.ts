@@ -40,6 +40,9 @@ export function toEventResponse(event: PostRunEvent) {
     createdAt: event.createdAt,
     updatedAt: event.updatedAt,
     createdByAdmin: event.createdByAdminPhone,
+    isArchived: event.archivedAt !== null,
+    archivedAt: event.archivedAt,
+    archivedByAdmin: event.archivedByAdminPhone,
   };
 }
 

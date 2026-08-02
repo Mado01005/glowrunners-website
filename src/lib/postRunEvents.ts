@@ -54,6 +54,12 @@ export type PostRunEventPatch = Readonly<
   Partial<PostRunEventInput>
 >;
 
+export type PostRunEventDeletionResult = Readonly<{
+  event: PostRunEvent;
+  participantCount: number;
+  paymentProofUrls: readonly string[];
+}>;
+
 export type PostRunParticipant = Readonly<{
   id: string;
   eventId: string;
@@ -1549,6 +1555,7 @@ async function readEventRows(
 async function requireEvent(
   eventId: string,
   columns: ColumnMap<EventColumn>,
+  options: Readonly<{ includeArchived?: boolean }> = {},
 ): Promise<PostRunEvent> {
   const normalizedEventId = requireBoundedText(
     eventId,
@@ -1558,7 +1565,7 @@ async function requireEvent(
   const events = await readEventRows(columns);
   const event = events.find((candidate) => candidate.value.id === normalizedEventId);
 
-  if (!event || event.value.archivedAt !== null) {
+  if (!event || (!options.includeArchived && event.value.archivedAt !== null)) {
     throw new PostRunEventsError(
       "NOT_FOUND",
       `Post-run event "${normalizedEventId}" was not found.`,
@@ -1566,6 +1573,26 @@ async function requireEvent(
   }
 
   return event.value;
+}
+
+async function readMatchingRowIndices(
+  sheetName: string,
+  columnIndex: number,
+  expectedValue: string,
+): Promise<number[]> {
+  const sheets = await getSheetsClient();
+  const response = await withGoogleSheetsRetry(
+    `find ${sheetName} rows for post-run event ${expectedValue}`,
+    () =>
+      sheets.spreadsheets.values.get({
+        spreadsheetId: GOOGLE_SPREADSHEET_ID,
+        range: `${quoteSheetName(sheetName)}!A2:${READ_RANGE_END_COLUMN}`,
+      }),
+  );
+
+  return (response.data.values ?? []).flatMap((row, index) =>
+    String(row[columnIndex] ?? "").trim() === expectedValue ? [index + 2] : [],
+  );
 }
 
 async function readBaseParticipantRows(
@@ -1831,15 +1858,18 @@ async function reconcileParticipantAddition(
   return addedRow.value;
 }
 
-export async function listPostRunEvents(): Promise<PostRunEvent[]> {
+export async function listPostRunEvents(
+  options: Readonly<{ includeArchived?: boolean }> = {},
+): Promise<PostRunEvent[]> {
   const columns = await getPostRunSheetColumns();
   const rows = await readEventRows(columns.events);
 
   return rows
     .map((row) => row.value)
-    .filter((event) => event.archivedAt === null)
+    .filter((event) => options.includeArchived || event.archivedAt === null)
     .sort((left, right) => {
       return (
+        Number(left.archivedAt !== null) - Number(right.archivedAt !== null) ||
         left.associatedDate.localeCompare(right.associatedDate) ||
         left.title.localeCompare(right.title)
       );
@@ -2151,11 +2181,188 @@ export async function archivePostRunEvent(
   });
 }
 
+export async function unarchivePostRunEvent(
+  eventId: string,
+  adminPhone: string,
+): Promise<PostRunEvent> {
+  const normalizedEventId = requireBoundedText(
+    eventId,
+    "Event ID",
+    MAX_ID_LENGTH,
+  );
+
+  return withEventMutationLock(normalizedEventId, async () => {
+    const columns = await getPostRunSheetColumns();
+    const eventRows = await readEventRows(columns.events);
+    const currentRow = eventRows.find(
+      (candidate) =>
+        candidate.value.id === normalizedEventId &&
+        candidate.value.archivedAt !== null,
+    );
+
+    if (!currentRow) {
+      throw new PostRunEventsError(
+        "NOT_FOUND",
+        `Archived post-run event "${normalizedEventId}" was not found.`,
+      );
+    }
+
+    requireCanonicalPhone(adminPhone, "Admin phone");
+    const restored: PostRunEvent = {
+      ...currentRow.value,
+      updatedAt: new Date().toISOString(),
+      archivedAt: null,
+      archivedByAdminPhone: null,
+    };
+    const finalColumn = columnIndexToA1(
+      Math.max(
+        ...Object.values(columns.events),
+        currentRow.rawRow.length - 1,
+      ),
+    );
+    const range = `${quoteSheetName(POST_RUN_EVENTS_SHEET_NAME)}!A${
+      currentRow.rowIndex
+    }:${finalColumn}${currentRow.rowIndex}`;
+    const sheets = await getSheetsClient();
+
+    await withGoogleSheetsIdempotentMutationRetry(
+      `unarchive post-run event ${restored.id}`,
+      () =>
+        sheets.spreadsheets.values.update({
+          spreadsheetId: GOOGLE_SPREADSHEET_ID,
+          range,
+          valueInputOption: "RAW",
+          requestBody: {
+            values: [
+              eventToRow(restored, columns.events, currentRow.rawRow),
+            ],
+          },
+        }),
+      async () => {
+        const refreshedRows = await readEventRows(columns.events);
+        return refreshedRows.some(
+          (candidate) =>
+            candidate.value.id === restored.id &&
+            candidate.value.archivedAt === null &&
+            candidate.value.updatedAt === restored.updatedAt,
+        );
+      },
+    );
+
+    return restored;
+  });
+}
+
+export async function deletePostRunEvent(
+  eventId: string,
+  adminPhone: string,
+): Promise<PostRunEventDeletionResult> {
+  const normalizedEventId = requireBoundedText(
+    eventId,
+    "Event ID",
+    MAX_ID_LENGTH,
+  );
+
+  return withEventMutationLock(normalizedEventId, async () => {
+    requireCanonicalPhone(adminPhone, "Admin phone");
+    const columns = await getPostRunSheetColumns();
+    const eventRows = await readEventRows(columns.events);
+    const currentRow = eventRows.find(
+      (candidate) => candidate.value.id === normalizedEventId,
+    );
+
+    if (!currentRow) {
+      throw new PostRunEventsError(
+        "NOT_FOUND",
+        `Post-run event "${normalizedEventId}" was not found.`,
+      );
+    }
+
+    const [participantRows, updateRowIndices] = await Promise.all([
+      readParticipantRows(
+        currentRow.value,
+        columns.participants,
+        columns.participantUpdates,
+      ),
+      readMatchingRowIndices(
+        POST_RUN_PARTICIPANT_UPDATES_SHEET_NAME,
+        columns.participantUpdates.eventId,
+        normalizedEventId,
+      ),
+    ]);
+    const participantRowIndices = participantRows.map((row) => row.rowIndex);
+    const ranges = [
+      `${quoteSheetName(POST_RUN_EVENTS_SHEET_NAME)}!${currentRow.rowIndex}:${currentRow.rowIndex}`,
+      ...participantRowIndices.map(
+        (rowIndex) =>
+          `${quoteSheetName(POST_RUN_PARTICIPANTS_SHEET_NAME)}!${rowIndex}:${rowIndex}`,
+      ),
+      ...updateRowIndices.map(
+        (rowIndex) =>
+          `${quoteSheetName(POST_RUN_PARTICIPANT_UPDATES_SHEET_NAME)}!${rowIndex}:${rowIndex}`,
+      ),
+    ];
+    const sheets = await getSheetsClient();
+
+    await withGoogleSheetsIdempotentMutationRetry(
+      `permanently delete post-run event ${normalizedEventId}`,
+      () =>
+        sheets.spreadsheets.values.batchClear({
+          spreadsheetId: GOOGLE_SPREADSHEET_ID,
+          requestBody: { ranges },
+        }),
+      async () => {
+        const [eventMatches, participantMatches, updateMatches] =
+          await Promise.all([
+            readMatchingRowIndices(
+              POST_RUN_EVENTS_SHEET_NAME,
+              columns.events.id,
+              normalizedEventId,
+            ),
+            readMatchingRowIndices(
+              POST_RUN_PARTICIPANTS_SHEET_NAME,
+              columns.participants.eventId,
+              normalizedEventId,
+            ),
+            readMatchingRowIndices(
+              POST_RUN_PARTICIPANT_UPDATES_SHEET_NAME,
+              columns.participantUpdates.eventId,
+              normalizedEventId,
+            ),
+          ]);
+
+        return (
+          eventMatches.length === 0 &&
+          participantMatches.length === 0 &&
+          updateMatches.length === 0
+        );
+      },
+    );
+
+    return {
+      event: currentRow.value,
+      participantCount: participantRows.length,
+      paymentProofUrls: [
+        ...new Set(
+          participantRows.flatMap((row) =>
+            row.value.paymentScreenshotUrl?.includes(
+              ".blob.vercel-storage.com",
+            )
+              ? [row.value.paymentScreenshotUrl]
+              : [],
+          ),
+        ),
+      ],
+    };
+  });
+}
+
 export async function listEventParticipants(
   eventId: string,
+  options: Readonly<{ includeArchived?: boolean }> = {},
 ): Promise<PostRunParticipant[]> {
   const columns = await getPostRunSheetColumns();
-  const event = await requireEvent(eventId, columns.events);
+  const event = await requireEvent(eventId, columns.events, options);
   const participants = await readParticipantRows(
     event,
     columns.participants,

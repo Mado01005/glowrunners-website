@@ -52,7 +52,9 @@ export async function GET(request: Request) {
   }
 
   try {
-    const participants = await listEventParticipants(eventId);
+    const participants = await listEventParticipants(eventId, {
+      includeArchived: session.admin.role === "super-admin",
+    });
     const participant = participants.find(
       (candidate) => candidate.id === participantId,
     );

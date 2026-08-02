@@ -25,8 +25,21 @@ export async function GET(request: Request) {
     return forbiddenPostRunResponse();
   }
 
+  const includeArchived =
+    new URL(request.url).searchParams.get("includeArchived") === "true";
+
+  if (includeArchived && session.admin.role !== "super-admin") {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Super Admin access is required to view archived events.",
+      },
+      { status: 403, headers: POST_RUN_NO_STORE_HEADERS },
+    );
+  }
+
   try {
-    const events = await listPostRunEvents();
+    const events = await listPostRunEvents({ includeArchived });
 
     return NextResponse.json(
       { success: true, events: events.map(toEventResponse) },

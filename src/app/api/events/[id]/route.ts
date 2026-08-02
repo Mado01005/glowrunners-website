@@ -1,3 +1,4 @@
+import { del } from "@vercel/blob";
 import { NextResponse } from "next/server";
 import { getAdminSessionFromRequest } from "@/lib/adminAuth";
 import { recordAdminActivity } from "@/lib/adminOperations";
@@ -11,6 +12,8 @@ import {
 } from "@/lib/postRunApi";
 import {
   archivePostRunEvent,
+  deletePostRunEvent,
+  unarchivePostRunEvent,
   updatePostRunEvent,
   type PostRunEventPatch,
 } from "@/lib/postRunEvents";
@@ -58,6 +61,58 @@ export async function PATCH(
       { success: false, error: "Event changes must be a JSON object." },
       { status: 400, headers: POST_RUN_NO_STORE_HEADERS },
     );
+  }
+
+  const lifecycleValue = hasOwn(body, "isArchived")
+    ? body.isArchived
+    : hasOwn(body, "is_archived")
+      ? body.is_archived
+      : undefined;
+
+  if (lifecycleValue !== undefined) {
+    if (typeof lifecycleValue !== "boolean") {
+      return NextResponse.json(
+        { success: false, error: "isArchived must be true or false." },
+        { status: 400, headers: POST_RUN_NO_STORE_HEADERS },
+      );
+    }
+
+    if (
+      Object.keys(body).some(
+        (key) => !["isArchived", "is_archived"].includes(key),
+      )
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Archive changes cannot be combined with event edits.",
+        },
+        { status: 400, headers: POST_RUN_NO_STORE_HEADERS },
+      );
+    }
+
+    try {
+      const event = lifecycleValue
+        ? await archivePostRunEvent(id, session.admin.phoneE164)
+        : await unarchivePostRunEvent(id, session.admin.phoneE164);
+      const action = lifecycleValue
+        ? "POST_RUN_EVENT_ARCHIVED"
+        : "POST_RUN_EVENT_UNARCHIVED";
+      const verb = lifecycleValue ? "archived" : "unarchived";
+      await recordAdminActivity(
+        session.admin,
+        action,
+        `${session.admin.displayName} ${verb} post-run event: ${event.title}`,
+        `post-run-event-${verb}:${event.id}:${event.updatedAt}`,
+      );
+
+      return NextResponse.json(
+        { success: true, event: toEventResponse(event) },
+        { headers: POST_RUN_NO_STORE_HEADERS },
+      );
+    } catch (error) {
+      return postRunErrorResponse(error, `/api/events/${id}`);
+    }
   }
 
   const patch: {
@@ -161,16 +216,42 @@ export async function DELETE(
   const { id } = await params;
 
   try {
-    const event = await archivePostRunEvent(id, session.admin.phoneE164);
+    const result = await deletePostRunEvent(id, session.admin.phoneE164);
     await recordAdminActivity(
       session.admin,
-      "POST_RUN_EVENT_ARCHIVED",
-      `${session.admin.displayName} archived post-run event: ${event.title}`,
-      `post-run-event-archive:${event.id}:${event.archivedAt}`,
+      "POST_RUN_EVENT_DELETED",
+      `${session.admin.displayName} permanently deleted post-run event: ${result.event.title} (${result.participantCount} participant records removed)`,
+      `post-run-event-delete:${result.event.id}:${Date.now()}`,
     );
 
+    if (result.paymentProofUrls.length > 0) {
+      const proofDeletionResults = await Promise.allSettled(
+        result.paymentProofUrls.map((url) => del(url)),
+      );
+      const failedProofDeletions = proofDeletionResults.filter(
+        (proofResult) => proofResult.status === "rejected",
+      ).length;
+
+      if (failedProofDeletions > 0) {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            route: `/api/events/${id}`,
+            message:
+              "Some payment proof blobs could not be removed after event deletion.",
+            eventId: result.event.id,
+            failedProofDeletions,
+          }),
+        );
+      }
+    }
+
     return NextResponse.json(
-      { success: true, event: toEventResponse(event) },
+      {
+        success: true,
+        event: toEventResponse(result.event),
+        deletedParticipants: result.participantCount,
+      },
       { headers: POST_RUN_NO_STORE_HEADERS },
     );
   } catch (error) {
