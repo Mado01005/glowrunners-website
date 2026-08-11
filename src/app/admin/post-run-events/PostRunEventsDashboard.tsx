@@ -93,6 +93,8 @@ const EMPTY_PARTICIPANT_FORM = {
 };
 
 const SESSION_STORAGE_KEY = "glowrunners.admin.identity.v1";
+const POST_RUN_EVENTS_API = "/api/post-run-events";
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const MONEY_FORMATTER = new Intl.NumberFormat("en-EG", {
   maximumFractionDigits: 2,
@@ -128,14 +130,42 @@ function formatEventDate(value: string) {
   return Number.isNaN(date.getTime()) ? value : DATE_FORMATTER.format(date);
 }
 
+function isIsoDate(value: unknown): value is string {
+  if (typeof value !== "string" || !ISO_DATE_PATTERN.test(value)) {
+    return false;
+  }
+
+  const [year, month, day] = value.split("-").map(Number);
+  const candidate = new Date(Date.UTC(year, month - 1, day, 12));
+
+  return (
+    candidate.getUTCFullYear() === year &&
+    candidate.getUTCMonth() === month - 1 &&
+    candidate.getUTCDate() === day
+  );
+}
+
 function whatsappPhone(value: string) {
+  if (!value.trim() || value.trim().startsWith("@")) {
+    return "";
+  }
+
   const digits = value.replace(/\D/g, "");
-  const withoutCountryCode = digits.replace(/^20/, "").replace(/^0+/, "");
-  return withoutCountryCode ? `20${withoutCountryCode}` : "";
+
+  if (digits.startsWith("20")) {
+    return digits;
+  }
+
+  if (value.trim().startsWith("+")) {
+    return digits;
+  }
+
+  const localEgyptianPhone = digits.replace(/^0+/, "");
+  return localEgyptianPhone ? `20${localEgyptianPhone}` : "";
 }
 
 function whatsappLink(phone: string, message: string) {
-  return `https://wa.me/${whatsappPhone(phone)}?text=${encodeURIComponent(message)}`;
+  return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
 }
 
 function paymentState(participant: Participant, event: PostRunEvent) {
@@ -417,11 +447,19 @@ function EventFormFields({
   onChange,
   submitLabel,
   isBusy,
+  canOverrideRunDate,
+  runDateMessage,
+  runDateMessageIsError = false,
+  submitDisabled = false,
 }: {
   form: EventFormState;
   onChange: (next: EventFormState) => void;
   submitLabel: string;
   isBusy: boolean;
+  canOverrideRunDate: boolean;
+  runDateMessage?: string;
+  runDateMessageIsError?: boolean;
+  submitDisabled?: boolean;
 }) {
   return (
     <div className="mt-4 flex flex-col gap-3">
@@ -443,12 +481,22 @@ function EventFormFields({
         <input
           type="date"
           required
+          disabled={isBusy || !canOverrideRunDate}
           value={form.runDate}
           onChange={(event) =>
             onChange({ ...form, runDate: event.target.value })
           }
-          className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
+          className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-400 disabled:cursor-not-allowed disabled:text-zinc-400"
         />
+        {runDateMessage ? (
+          <span
+            className={`mt-1.5 block min-w-0 break-words text-[11px] font-semibold normal-case tracking-normal ${
+              runDateMessageIsError ? "text-amber-300" : "text-zinc-500"
+            }`}
+          >
+            {runDateMessage}
+          </span>
+        ) : null}
       </label>
       <div className="grid min-w-0 grid-cols-2 gap-2">
         <label className="min-w-0 text-xs font-black uppercase tracking-wide text-zinc-400">
@@ -523,7 +571,7 @@ function EventFormFields({
       </label>
       <button
         type="submit"
-        disabled={isBusy}
+        disabled={isBusy || submitDisabled}
         className="min-h-14 w-full rounded-xl bg-fuchsia-500 px-4 text-base font-black text-white disabled:opacity-50"
       >
         {submitLabel}
@@ -556,11 +604,21 @@ export function PostRunEventsDashboard() {
   const [busyKey, setBusyKey] = useState("");
   const [isLoadingEvents, setIsLoadingEvents] = useState(true);
   const [isLoadingParticipants, setIsLoadingParticipants] = useState(false);
+  const [eventsServiceError, setEventsServiceError] = useState<string | null>(
+    null,
+  );
+  const [eventsConnectionMessage, setEventsConnectionMessage] = useState<
+    string | null
+  >(null);
+  const [isLoadingRunDate, setIsLoadingRunDate] = useState(false);
+  const [activeRunSheetName, setActiveRunSheetName] = useState("");
+  const [activeRunDateError, setActiveRunDateError] = useState("");
   const [notice, setNotice] = useState<{
     tone: "success" | "error" | "idle";
     message: string;
   }>({ tone: "idle", message: "" });
   const participantsRequestIdRef = useRef(0);
+  const activeDateRequestIdRef = useRef(0);
   const activeOperationRef = useRef(false);
 
   const selectedEvent =
@@ -602,27 +660,60 @@ export function PostRunEventsDashboard() {
 
   const loadEvents = useCallback(async (includeArchived = false) => {
     setIsLoadingEvents(true);
+    setEventsServiceError(null);
+    setEventsConnectionMessage(null);
 
     try {
-      const { response, payload } = await apiRequest(
-        includeArchived ? "/api/events?includeArchived=true" : "/api/events",
-      );
+      let result: Awaited<ReturnType<typeof apiRequest>>;
 
-      if (
-        !response.ok ||
-        !isObject(payload) ||
-        !Array.isArray(payload.events)
-      ) {
-        throw new Error(readError(payload, "Events could not be loaded."));
+      try {
+        result = await apiRequest(
+          includeArchived
+            ? `${POST_RUN_EVENTS_API}?includeArchived=true`
+            : POST_RUN_EVENTS_API,
+        );
+      } catch {
+        setEventsConnectionMessage(
+          "The post-run events service could not be reached. Check the connection and retry.",
+        );
+        return false;
       }
 
-      const nextEvents = payload.events as PostRunEvent[];
+      const { response, payload } = result;
+
+      if (response.status === 500 || response.status === 503) {
+        setEventsServiceError(
+          readError(
+            payload,
+            "The post-run events service is temporarily unavailable.",
+          ),
+        );
+        return false;
+      }
+
+      if (!response.ok) {
+        return false;
+      }
+
+      const eventPayload = Array.isArray(payload)
+        ? payload
+        : isObject(payload) && Array.isArray(payload.events)
+          ? payload.events
+          : null;
+
+      if (!eventPayload) {
+        return false;
+      }
+
+      const nextEvents = eventPayload as PostRunEvent[];
+      setEventsServiceError(null);
       setEvents(nextEvents);
       setSelectedEventId((current) =>
         nextEvents.some((event) => event.id === current)
           ? current
           : (nextEvents[0]?.id ?? ""),
       );
+      return true;
     } finally {
       setIsLoadingEvents(false);
     }
@@ -631,6 +722,8 @@ export function PostRunEventsDashboard() {
   const loadParticipants = useCallback(async (eventId: string) => {
     const requestId = participantsRequestIdRef.current + 1;
     participantsRequestIdRef.current = requestId;
+    setEventsServiceError(null);
+    setEventsConnectionMessage(null);
     setParticipants([]);
 
     if (!eventId) {
@@ -674,6 +767,8 @@ export function PostRunEventsDashboard() {
   }, []);
 
   useEffect(() => {
+    setEventsServiceError(null);
+    setEventsConnectionMessage(null);
     void Promise.all([loadSession(), loadEvents(false)]).catch(
       (error: unknown) => {
         setNotice({
@@ -736,15 +831,69 @@ export function PostRunEventsDashboard() {
     });
   }, [participants, paymentFilter, search, selectedEvent]);
 
+  const refreshActiveRunDate = useCallback(async (requestId: number) => {
+    setIsLoadingRunDate(true);
+    setActiveRunDateError("");
+    setActiveRunSheetName("");
+
+    try {
+      const { response, payload } = await apiRequest("/api/sheets/active-date");
+
+      if (activeDateRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      if (!response.ok) {
+        setActiveRunDateError(
+          readError(payload, "The active run date could not be loaded."),
+        );
+        return;
+      }
+
+      if (!isObject(payload) || !isIsoDate(payload.date)) {
+        setActiveRunDateError(
+          "No dated Attendance tab was found. A Super Admin can choose a custom date.",
+        );
+        return;
+      }
+
+      const activeDate = payload.date;
+      setActiveRunSheetName(
+        typeof payload.sheetName === "string" ? payload.sheetName : "",
+      );
+      setEventForm((current) =>
+        current.runDate ? current : { ...current, runDate: activeDate },
+      );
+    } catch {
+      if (activeDateRequestIdRef.current === requestId) {
+        setActiveRunDateError(
+          "The active run date service could not be reached. A Super Admin can choose a custom date.",
+        );
+      }
+    } finally {
+      if (activeDateRequestIdRef.current === requestId) {
+        setIsLoadingRunDate(false);
+      }
+    }
+  }, []);
+
   const openCreateEvent = () => {
+    const requestId = activeDateRequestIdRef.current + 1;
+    activeDateRequestIdRef.current = requestId;
     setEventForm(EMPTY_EVENT_FORM);
     setEventModal("create");
+    void refreshActiveRunDate(requestId);
   };
 
   const openEditEvent = () => {
     if (!selectedEvent || !isSuperAdmin || selectedEvent.isArchived) {
       return;
     }
+
+    activeDateRequestIdRef.current += 1;
+    setIsLoadingRunDate(false);
+    setActiveRunDateError("");
+    setActiveRunSheetName("");
 
     setEventForm({
       title: selectedEvent.title,
@@ -758,6 +907,12 @@ export function PostRunEventsDashboard() {
     setEventModal("edit");
   };
 
+  const closeEventModal = () => {
+    activeDateRequestIdRef.current += 1;
+    setIsLoadingRunDate(false);
+    setEventModal(null);
+  };
+
   const createEvent = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
@@ -769,7 +924,7 @@ export function PostRunEventsDashboard() {
     setBusyKey("create-event");
 
     try {
-      const { response, payload } = await apiRequest("/api/events", {
+      const { response, payload } = await apiRequest(POST_RUN_EVENTS_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -791,7 +946,7 @@ export function PostRunEventsDashboard() {
       const created = payload.event as PostRunEvent;
       setEvents((current) => [created, ...current]);
       setSelectedEventId(created.id);
-      setEventModal(null);
+      closeEventModal();
       setNotice({
         tone: "success",
         message: `${created.title} was created.`,
@@ -847,7 +1002,7 @@ export function PostRunEventsDashboard() {
           candidate.id === updated.id ? updated : candidate,
         ),
       );
-      setEventModal(null);
+      closeEventModal();
       setNotice({
         tone: "success",
         message: `${updated.title} settings were updated.`,
@@ -950,7 +1105,11 @@ export function PostRunEventsDashboard() {
     setShowArchivedEvents(nextValue);
 
     try {
-      await loadEvents(nextValue);
+      const loaded = await loadEvents(nextValue);
+
+      if (!loaded) {
+        setShowArchivedEvents(!nextValue);
+      }
     } catch (error) {
       setShowArchivedEvents(!nextValue);
       setNotice({
@@ -1014,11 +1173,12 @@ export function PostRunEventsDashboard() {
 
   const addParticipant = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setEventsServiceError(null);
+    setEventsConnectionMessage(null);
 
     if (
       !selectedEvent ||
       selectedEvent.isArchived ||
-      isLoadingParticipants ||
       activeOperationRef.current
     ) {
       return;
@@ -1414,6 +1574,28 @@ export function PostRunEventsDashboard() {
           </div>
         ) : null}
 
+        {eventsServiceError &&
+        !/initializing|storage|configured/i.test(eventsServiceError) ? (
+          <div
+            className="min-w-0 break-words rounded-xl border border-red-800 bg-red-950/60 px-3 py-2 text-xs font-bold text-red-200"
+            role="alert"
+            aria-live="polite"
+          >
+            {eventsServiceError}
+          </div>
+        ) : null}
+
+        {eventsConnectionMessage &&
+        !/initializing|storage|configured/i.test(eventsConnectionMessage) ? (
+          <div
+            className="min-w-0 break-words rounded-xl border border-amber-800 bg-amber-950/50 px-3 py-2 text-xs font-bold text-amber-200"
+            role="status"
+            aria-live="polite"
+          >
+            {eventsConnectionMessage}
+          </div>
+        ) : null}
+
         {isLoadingEvents ? (
           <section className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-sm font-bold text-zinc-400">
             Loading events…
@@ -1457,7 +1639,11 @@ export function PostRunEventsDashboard() {
                 <select
                   value={selectedEventId}
                   disabled={isAnyBusy}
-                  onChange={(event) => setSelectedEventId(event.target.value)}
+                  onChange={(event) => {
+                    setEventsServiceError(null);
+                    setEventsConnectionMessage(null);
+                    setSelectedEventId(event.target.value);
+                  }}
                   className="min-h-11 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-sm font-black text-white outline-none focus:border-fuchsia-400"
                 >
                   {activeEvents.length > 0 ? (
@@ -1660,7 +1846,6 @@ export function PostRunEventsDashboard() {
                       required
                       maxLength={120}
                       autoComplete="name"
-                      disabled={isAnyBusy}
                       placeholder="Participant name"
                       value={participantForm.fullName}
                       onChange={(event) =>
@@ -1672,13 +1857,11 @@ export function PostRunEventsDashboard() {
                       className="min-h-12 min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold outline-none focus:border-fuchsia-400"
                     />
                     <input
-                      type="tel"
-                      required
-                      maxLength={24}
-                      inputMode="tel"
-                      autoComplete="tel"
-                      disabled={isAnyBusy}
-                      placeholder="WhatsApp phone"
+                      type="text"
+                      maxLength={80}
+                      autoComplete="off"
+                      aria-label="WhatsApp phone or @username (optional)"
+                      placeholder="WhatsApp phone or @username (optional)"
                       value={participantForm.phoneNumber}
                       onChange={(event) =>
                         setParticipantForm((current) => ({
@@ -1690,11 +1873,6 @@ export function PostRunEventsDashboard() {
                     />
                     <button
                       type="submit"
-                      disabled={
-                        isAnyBusy ||
-                        (selectedEvent.capacity !== null &&
-                          participants.length >= selectedEvent.capacity)
-                      }
                       className="min-h-12 rounded-xl bg-white px-3 text-sm font-black text-black disabled:opacity-50 sm:col-span-2"
                     >
                       {busyKey === "add-participant"
@@ -1785,7 +1963,7 @@ export function PostRunEventsDashboard() {
                                 {participant.fullName}
                               </span>
                               <span className="block truncate text-[9px] font-bold tabular-nums text-zinc-500">
-                                {participant.phoneNumber}
+                                {participant.phoneNumber || "No contact provided"}
                               </span>
                             </span>
                             <span
@@ -1837,13 +2015,37 @@ export function PostRunEventsDashboard() {
       {eventModal ? (
         <ModalShell
           title={eventModal === "create" ? "Create event" : "Edit event settings"}
-          onClose={() => setEventModal(null)}
+          onClose={closeEventModal}
         >
           <form onSubmit={eventModal === "create" ? createEvent : editEvent}>
             <EventFormFields
               form={eventForm}
               onChange={setEventForm}
               isBusy={isAnyBusy}
+              canOverrideRunDate={
+                eventModal === "edit" || Boolean(isSuperAdmin)
+              }
+              runDateMessage={
+                eventModal !== "create"
+                  ? undefined
+                  : isLoadingRunDate
+                    ? "Reading the newest Attendance tab…"
+                    : activeRunDateError
+                      ? activeRunDateError
+                      : activeRunSheetName
+                        ? `Synced from “${activeRunSheetName}”. ${
+                            isSuperAdmin
+                              ? "You can override this date if needed."
+                              : "Only a Super Admin can override it."
+                          }`
+                        : undefined
+              }
+              runDateMessageIsError={Boolean(activeRunDateError)}
+              submitDisabled={
+                eventModal === "create" &&
+                !isSuperAdmin &&
+                (isLoadingRunDate || !eventForm.runDate)
+              }
               submitLabel={
                 busyKey === "create-event"
                   ? "Creating…"
@@ -1908,6 +2110,9 @@ export function PostRunEventsDashboard() {
         >
           {(() => {
             const state = paymentState(selectedParticipant, selectedEvent);
+            const directWhatsappPhone = whatsappPhone(
+              selectedParticipant.phoneNumber,
+            );
             const depositRequest = `Hi ${selectedParticipant.fullName}! You are registered for ${selectedEvent.title} on ${formatEventDate(
               selectedEvent.runDate,
             )}. Total cost: ${formatMoney(
@@ -1952,6 +2157,10 @@ export function PostRunEventsDashboard() {
                     </p>
                   </div>
                 </div>
+
+                <p className="min-w-0 truncate rounded-lg border border-zinc-800 bg-black px-3 py-2 text-xs font-bold text-zinc-400">
+                  Contact: {selectedParticipant.phoneNumber || "Not provided"}
+                </p>
 
                 {!isSelectedEventArchived ? (
                   <form
@@ -2055,10 +2264,11 @@ export function PostRunEventsDashboard() {
                   </button>
                 </div>
 
-                <div className="grid min-w-0 grid-cols-3 gap-2">
+                {directWhatsappPhone ? (
+                  <div className="grid min-w-0 grid-cols-3 gap-2">
                   <a
                     href={whatsappLink(
-                      selectedParticipant.phoneNumber,
+                      directWhatsappPhone,
                       depositRequest,
                     )}
                     target="_blank"
@@ -2069,7 +2279,7 @@ export function PostRunEventsDashboard() {
                   </a>
                   <a
                     href={whatsappLink(
-                      selectedParticipant.phoneNumber,
+                      directWhatsappPhone,
                       balanceNotice,
                     )}
                     target="_blank"
@@ -2080,7 +2290,7 @@ export function PostRunEventsDashboard() {
                   </a>
                   <a
                     href={whatsappLink(
-                      selectedParticipant.phoneNumber,
+                      directWhatsappPhone,
                       finalReceipt,
                     )}
                     target="_blank"
@@ -2099,7 +2309,12 @@ export function PostRunEventsDashboard() {
                   >
                     Final Receipt
                   </a>
-                </div>
+                  </div>
+                ) : (
+                  <p className="rounded-xl border border-zinc-800 px-3 py-3 text-center text-xs font-bold text-zinc-500">
+                    Direct WhatsApp messages require a phone number.
+                  </p>
+                )}
 
                 {!isSelectedEventArchived ? (
                   <form

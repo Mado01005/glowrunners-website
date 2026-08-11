@@ -1267,7 +1267,7 @@ export function GateControlDashboard() {
 
   const filteredRoster = useMemo(() => {
     const query = search.trim().toLocaleLowerCase("en-US");
-    const phoneQuery = search.replace(/\D/g, "");
+    const phoneQuery = normalizePhone(search);
 
     return dashboard.roster
       .filter((runner) => {
@@ -1767,7 +1767,7 @@ export function GateControlDashboard() {
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="🔍 Search by name or phone number..."
+              placeholder="🔍 Search by name, phone, or @username..."
               className="min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-pink-400"
             />
           </label>

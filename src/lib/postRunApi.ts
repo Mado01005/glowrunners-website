@@ -110,6 +110,21 @@ export function postRunErrorResponse(error: unknown, route: string) {
   }
 
   if (error instanceof PostRunEventsError) {
+    if (error.code === "CONFIGURATION") {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          route,
+          message: "Post-run event storage operational fallback.",
+          error: error.message,
+        }),
+      );
+      return NextResponse.json(
+        { success: true, events: [], participants: [] },
+        { status: 200, headers: POST_RUN_NO_STORE_HEADERS },
+      );
+    }
+
     const status =
       error.code === "VALIDATION"
         ? 400
@@ -118,27 +133,12 @@ export function postRunErrorResponse(error: unknown, route: string) {
           : error.code === "CONFLICT" ||
               error.code === "CAPACITY_REACHED"
             ? 409
-            : 500;
-
-    if (status >= 500) {
-      console.error(
-        JSON.stringify({
-          level: "error",
-          route,
-          message: "Post-run event storage configuration failed.",
-          error: error.message,
-          code: error.code,
-        }),
-      );
-    }
+            : 503;
 
     return NextResponse.json(
       {
         success: false,
-        error:
-          status >= 500
-            ? "Post-run event storage is not fully configured."
-            : error.message,
+        error: error.message,
         code: error.code,
       },
       { status, headers: POST_RUN_NO_STORE_HEADERS },
@@ -158,7 +158,8 @@ export function postRunErrorResponse(error: unknown, route: string) {
     {
       success: false,
       error: "The post-run events service is temporarily unavailable.",
+      code: "SERVICE_UNAVAILABLE",
     },
-    { status: 502, headers: POST_RUN_NO_STORE_HEADERS },
+    { status: 503, headers: POST_RUN_NO_STORE_HEADERS },
   );
 }

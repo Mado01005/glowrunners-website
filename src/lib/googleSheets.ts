@@ -1,6 +1,13 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { JWTInput } from "google-auth-library";
 import { google, type sheets_v4 } from "googleapis";
 import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
+import {
+  parseAttendanceSheetDate,
+  selectLatestAttendanceDate,
+  type ResolvedAttendanceDate,
+} from "@/lib/attendanceSheetDate";
 
 const DEFAULT_SPREADSHEET_ID =
   "1MJApZDOATx8vZUGKBtaHOFnIo831lSZJHl8KUJEaguM";
@@ -13,9 +20,9 @@ const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const CONFIRMED_VALUE = "✅ CONFIRMED";
 const DEFAULT_TIME_ZONE = "Africa/Cairo";
 const GOOGLE_CREDENTIAL_ENV_NAMES = [
+  "GOOGLE_CREDENTIALS_JSON",
   "GOOGLE_SHEETS_CREDENTIALS",
   "GOOGLE_CREDS_JSON",
-  "GOOGLE_CREDENTIALS_JSON",
 ] as const;
 const MAX_SHEETS_REQUEST_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 250;
@@ -96,6 +103,7 @@ const ATTENDANCE_HEADER_ALIASES: Readonly<
     "check-in status",
     "confirmation status",
     "confirmed",
+    "confirmed?",
   ],
 };
 
@@ -165,17 +173,10 @@ function escapeControlCharactersInsideJsonStrings(value: string): string {
   return result;
 }
 
-function getGoogleSheetsCredentials(): JWTInput {
-  const serializedCredentials = GOOGLE_CREDENTIAL_ENV_NAMES.map(
-    (name) => process.env[name]?.trim(),
-  ).find((value) => Boolean(value));
-
-  if (!serializedCredentials) {
-    throw new Error(
-      `Configure one of ${GOOGLE_CREDENTIAL_ENV_NAMES.join(", ")}.`,
-    );
-  }
-
+function parseGoogleSheetsCredentials(
+  serializedCredentials: string,
+  sourceName: string,
+): JWTInput {
   let credentials: unknown;
 
   try {
@@ -187,18 +188,14 @@ function getGoogleSheetsCredentials(): JWTInput {
       );
     } catch {
       throw new Error(
-        `${GOOGLE_CREDENTIAL_ENV_NAMES.join(
-          ", ",
-        )} must contain a valid service-account JSON object.`,
+        `${sourceName} must contain a valid service-account JSON object.`,
       );
     }
   }
 
   if (!isGoogleServiceAccountCredentials(credentials)) {
     throw new Error(
-      `${GOOGLE_CREDENTIAL_ENV_NAMES.join(
-        ", ",
-      )} must contain a valid client_email and private_key.`,
+      `${sourceName} must contain a valid client_email and private_key.`,
     );
   }
 
@@ -208,10 +205,55 @@ function getGoogleSheetsCredentials(): JWTInput {
   };
 }
 
+async function getGoogleSheetsCredentials(): Promise<JWTInput> {
+  const configuredEnvironmentCredential = GOOGLE_CREDENTIAL_ENV_NAMES.map(
+    (name) => process.env[name]?.trim(),
+  ).find((value): value is string => Boolean(value));
+
+  if (configuredEnvironmentCredential) {
+    return parseGoogleSheetsCredentials(
+      configuredEnvironmentCredential,
+      GOOGLE_CREDENTIAL_ENV_NAMES.join(", "),
+    );
+  }
+
+  const credentialsPath = resolve(process.cwd(), "credentials.json");
+  let fileCredentials: string;
+
+  try {
+    fileCredentials = (await readFile(credentialsPath, "utf8")).trim();
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      throw new Error(
+        `Configure one of ${GOOGLE_CREDENTIAL_ENV_NAMES.join(
+          ", ",
+        )} or provide credentials.json.`,
+      );
+    }
+
+    throw new Error(
+      `Unable to read credentials.json: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  if (!fileCredentials) {
+    throw new Error("credentials.json is empty.");
+  }
+
+  return parseGoogleSheetsCredentials(fileCredentials, "credentials.json");
+}
+
 export async function getSheetsClient(): Promise<sheets_v4.Sheets> {
   if (!sheetsClientPromise) {
     sheetsClientPromise = (async () => {
-      const credentials = getGoogleSheetsCredentials();
+      const credentials = await getGoogleSheetsCredentials();
       const auth = new google.auth.GoogleAuth({
         credentials,
         scopes: [GOOGLE_SHEETS_SCOPE],
@@ -226,6 +268,11 @@ export async function getSheetsClient(): Promise<sheets_v4.Sheets> {
 
   return sheetsClientPromise;
 }
+
+/*
+ * Keep the client lazy: local development may use credentials.json, while
+ * Vercel must provide one of the environment variables above.
+ */
 
 function readErrorStatus(error: unknown): number | undefined {
   if (!isObject(error)) {
@@ -676,59 +723,6 @@ export function getActiveAttendanceSheetName(
   )} of ${meetupMonth}`;
 }
 
-const ATTENDANCE_SHEET_PATTERN =
-  /^attendance\s*-\s*(tuesday|friday)\s*-\s*(\d{1,2})(?:st|nd|rd|th)?\s+of\s+([a-z]+)\s*$/i;
-const MONTH_INDEX_BY_NAME = new Map(
-  Array.from({ length: 12 }, (_, monthIndex) => [
-    new Date(Date.UTC(2024, monthIndex, 1))
-      .toLocaleString("en-US", { month: "long", timeZone: "UTC" })
-      .toLocaleLowerCase("en-US"),
-    monthIndex,
-  ]),
-);
-
-function parseAttendanceSheetDate(
-  sheetName: string,
-  referenceDate: Date,
-): Date | null {
-  const match = sheetName.trim().match(ATTENDANCE_SHEET_PATTERN);
-
-  if (!match) {
-    return null;
-  }
-
-  const weekday = match[1].toLocaleLowerCase("en-US");
-  const day = Number(match[2]);
-  const monthIndex = MONTH_INDEX_BY_NAME.get(
-    match[3].toLocaleLowerCase("en-US"),
-  );
-
-  if (monthIndex === undefined) {
-    return null;
-  }
-
-  const expectedWeekday = weekday === "tuesday" ? 2 : 5;
-  const candidates = [-1, 0, 1].flatMap((yearOffset) => {
-    const candidate = new Date(
-      Date.UTC(referenceDate.getUTCFullYear() + yearOffset, monthIndex, day, 12),
-    );
-
-    return candidate.getUTCMonth() === monthIndex &&
-      candidate.getUTCDate() === day &&
-      candidate.getUTCDay() === expectedWeekday
-      ? [candidate]
-      : [];
-  });
-
-  return (
-    candidates.sort(
-      (left, right) =>
-        Math.abs(left.getTime() - referenceDate.getTime()) -
-        Math.abs(right.getTime() - referenceDate.getTime()),
-    )[0] ?? null
-  );
-}
-
 export async function resolveActiveAttendanceSheetName(): Promise<{
   sheetName: string;
   isFallback: boolean;
@@ -800,6 +794,40 @@ export async function resolveActiveAttendanceSheetName(): Promise<{
   return fallbackSheet
     ? { sheetName: fallbackSheet.title, isFallback: true }
     : { sheetName: desiredSheetName, isFallback: false };
+}
+
+export async function resolveLatestAttendanceDate(
+  now = new Date(),
+): Promise<ResolvedAttendanceDate | null> {
+  const localParts = getLocalDateParts(now, DEFAULT_TIME_ZONE);
+  const localToday = new Date(
+    Date.UTC(localParts.year, localParts.month - 1, localParts.day, 12),
+  );
+  const sheets = await getSheetsClient();
+  const response = await withGoogleSheetsRetry(
+    "resolve latest attendance date",
+    () =>
+      sheets.spreadsheets.get({
+        spreadsheetId: DEFAULT_SPREADSHEET_ID,
+        fields: "sheets.properties(title,index,hidden,sheetType)",
+      }),
+  );
+  const availableSheets = (response.data.sheets ?? []).flatMap((sheet) => {
+    const properties = sheet.properties;
+
+    return typeof properties?.title === "string"
+      ? [
+          {
+            title: properties.title,
+            index: properties.index,
+            hidden: properties.hidden,
+            sheetType: properties.sheetType,
+          },
+        ]
+      : [];
+  });
+
+  return selectLatestAttendanceDate(availableSheets, localToday);
 }
 
 export async function findRunnerByPhone(

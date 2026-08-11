@@ -14,6 +14,14 @@ export const POST_RUN_EVENTS_SHEET_NAME = "PostRunEvents";
 export const POST_RUN_PARTICIPANTS_SHEET_NAME = "PostRunParticipants";
 export const POST_RUN_PARTICIPANT_UPDATES_SHEET_NAME =
   "PostRunParticipantUpdates";
+const POST_RUN_EVENT_TAB_HEADERS = [
+  "Full Name",
+  "Phone / WhatsApp",
+  "Payment Status",
+  "Amount Paid",
+  "Balance Owed",
+  "Timestamp",
+] as const;
 
 export const POST_RUN_DEPOSIT_STATUSES = ["Pending", "Verified"] as const;
 export const POST_RUN_SETTLEMENT_STATUSES = [
@@ -296,7 +304,11 @@ const PARTICIPANT_HEADER_DEFINITIONS: readonly HeaderDefinition<ParticipantColum
       header: "WhatsApp Phone",
       aliases: [
         "whatsapp phone",
+        "whatsapp phone or username",
         "whatsapp number",
+        "whatsapp username",
+        "username",
+        "contact",
         "phone number",
         "mobile number",
         "phone",
@@ -423,6 +435,7 @@ const PARTICIPANT_UPDATE_HEADER_DEFINITIONS: readonly HeaderDefinition<Participa
 
 const MAX_TITLE_LENGTH = 120;
 const MAX_NAME_LENGTH = 120;
+const MAX_CONTACT_LENGTH = 80;
 const MAX_PAYMENT_INSTRUCTIONS_LENGTH = 2_000;
 const MAX_INTERNAL_NOTES_LENGTH = 2_000;
 // Google Sheets cells accept up to 50,000 characters. Keep the inline fallback
@@ -653,7 +666,70 @@ function requireCanonicalPhone(
     );
   }
 
-  return phone;
+  return `+20${phone}`;
+}
+
+function normalizeParticipantContact(
+  value: unknown,
+  errorKind: "CONFIGURATION" | "VALIDATION" = "VALIDATION",
+): string {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return "";
+  }
+
+  if (typeof value !== "string") {
+    throw new PostRunEventsError(
+      errorKind,
+      "WhatsApp phone or @username must be text.",
+    );
+  }
+
+  const contact = value.trim();
+
+  if (contact.length > MAX_CONTACT_LENGTH) {
+    throw new PostRunEventsError(
+      errorKind,
+      `WhatsApp phone or @username must be at most ${MAX_CONTACT_LENGTH} characters.`,
+    );
+  }
+
+  if (contact.startsWith("@")) {
+    if (!/^@[^\s@]+$/u.test(contact)) {
+      throw new PostRunEventsError(
+        errorKind,
+        "WhatsApp username must start with @ and contain no spaces.",
+      );
+    }
+
+    return contact;
+  }
+
+  const egyptianPhone = normalizeEgyptianMobilePhone(contact);
+
+  if (egyptianPhone !== null) {
+    return `+20${egyptianPhone}`;
+  }
+
+  const internationalPhone = contact.replace(/[\s().-]/g, "");
+
+  if (/^\+[1-9]\d{7,14}$/.test(internationalPhone)) {
+    return internationalPhone;
+  }
+
+  throw new PostRunEventsError(
+    errorKind,
+    "WhatsApp contact must be an Egyptian/international phone number, an @username, or blank.",
+  );
+}
+
+function serializeParticipantContact(value: string): string {
+  const contact = value.trim();
+
+  if (!contact || contact.startsWith("@")) {
+    return contact;
+  }
+
+  return contact.startsWith("'") ? contact : `'${contact}`;
 }
 
 function optionalCanonicalPhone(
@@ -839,7 +915,6 @@ function normalizedAliases<Key extends string>(
 }
 
 function resolveHeaderColumns<Key extends string>(
-  sheetName: string,
   headerRow: readonly unknown[],
   definitions: readonly HeaderDefinition<Key>[],
 ): {
@@ -852,23 +927,14 @@ function resolveHeaderColumns<Key extends string>(
 
   for (const definition of definitions) {
     const aliases = normalizedAliases(definition);
-    const matchingIndices: number[] = [];
+    for (let index = normalizedHeaders.length - 1; index >= 0; index -= 1) {
+      const header = normalizedHeaders[index];
 
-    normalizedHeaders.forEach((header, index) => {
       if (header && aliases.has(header)) {
-        matchingIndices.push(index);
+        columns[definition.key] = index;
+        recognizedCount += 1;
+        break;
       }
-    });
-
-    if (matchingIndices.length > 1) {
-      throw configurationError(
-        `${sheetName} has duplicate columns for "${definition.header}".`,
-      );
-    }
-
-    if (matchingIndices.length === 1) {
-      columns[definition.key] = matchingIndices[0];
-      recognizedCount += 1;
     }
   }
 
@@ -961,7 +1027,7 @@ async function ensureSheetHeaders<Key extends string>(
       }),
   );
   let headerRow = [...(response.data.values?.[0] ?? [])];
-  let resolved = resolveHeaderColumns(sheetName, headerRow, definitions);
+  let resolved = resolveHeaderColumns(headerRow, definitions);
   const hasNonEmptyCell = headerRow.some(
     (cell) => normalizeSheetHeader(cell).length > 0,
   );
@@ -988,7 +1054,7 @@ async function ensureSheetHeaders<Key extends string>(
       }),
     );
     headerRow = [];
-    resolved = resolveHeaderColumns(sheetName, headerRow, definitions);
+    resolved = resolveHeaderColumns(headerRow, definitions);
   }
 
   const columns = { ...resolved.columns } as Partial<Record<Key, number>>;
@@ -1029,6 +1095,106 @@ async function ensureSheetHeaders<Key extends string>(
   }
 
   return columns as ColumnMap<Key>;
+}
+
+async function getExistingEventColumns(): Promise<ColumnMap<EventColumn> | null> {
+  const existing = await findSheetProperties(POST_RUN_EVENTS_SHEET_NAME);
+
+  if (typeof existing?.sheetId !== "number") {
+    return null;
+  }
+
+  const sheets = await getSheetsClient();
+  const response = await withGoogleSheetsRetry(
+    `read ${POST_RUN_EVENTS_SHEET_NAME} headers without initialization`,
+    () =>
+      sheets.spreadsheets.values.get({
+        spreadsheetId: GOOGLE_SPREADSHEET_ID,
+        range: `${quoteSheetName(POST_RUN_EVENTS_SHEET_NAME)}!1:1`,
+      }),
+  );
+  const headerRow = response.data.values?.[0] ?? [];
+  const hasNonEmptyCell = headerRow.some(
+    (cell) => normalizeSheetHeader(cell).length > 0,
+  );
+
+  if (!hasNonEmptyCell) {
+    return null;
+  }
+
+  const hasDataRows = async () => {
+    const dataResponse = await withGoogleSheetsRetry(
+      `check ${POST_RUN_EVENTS_SHEET_NAME} initialization state`,
+      () =>
+        sheets.spreadsheets.values.get({
+          spreadsheetId: GOOGLE_SPREADSHEET_ID,
+          range: `${quoteSheetName(
+            POST_RUN_EVENTS_SHEET_NAME,
+          )}!A2:${READ_RANGE_END_COLUMN}`,
+        }),
+    );
+
+    return (dataResponse.data.values ?? []).some((row) =>
+      row.some((cell) => String(cell ?? "").trim().length > 0),
+    );
+  };
+  let resolved: ReturnType<typeof resolveHeaderColumns<EventColumn>>;
+
+  try {
+    resolved = resolveHeaderColumns(
+      headerRow,
+      EVENT_HEADER_DEFINITIONS,
+    );
+  } catch (error) {
+    if (
+      error instanceof PostRunEventsError &&
+      error.code === "CONFIGURATION" &&
+      !(await hasDataRows())
+    ) {
+      return null;
+    }
+
+    throw error;
+  }
+
+  if (resolved.recognizedCount === 0) {
+    return null;
+  }
+
+  const columns = { ...resolved.columns } as Partial<
+    Record<EventColumn, number>
+  >;
+  const optionalColumns = new Set<EventColumn>([
+    "archivedAt",
+    "archivedByAdminPhone",
+  ]);
+  let virtualColumnIndex = headerRow.length;
+
+  for (const definition of EVENT_HEADER_DEFINITIONS) {
+    if (
+      columns[definition.key] === undefined &&
+      optionalColumns.has(definition.key)
+    ) {
+      columns[definition.key] = virtualColumnIndex;
+      virtualColumnIndex += 1;
+    }
+  }
+
+  const missingRequiredColumn = EVENT_HEADER_DEFINITIONS.find(
+    (definition) => columns[definition.key] === undefined,
+  );
+
+  if (missingRequiredColumn) {
+    if (!(await hasDataRows())) {
+      return null;
+    }
+
+    throw configurationError(
+      `${POST_RUN_EVENTS_SHEET_NAME} is missing the "${missingRequiredColumn.header}" column.`,
+    );
+  }
+
+  return columns as ColumnMap<EventColumn>;
 }
 
 async function getPostRunSheetColumns(): Promise<PostRunSheetColumns> {
@@ -1091,7 +1257,9 @@ function participantToRow(
   row[columns.id] = participant.id;
   row[columns.eventId] = participant.eventId;
   row[columns.name] = participant.name;
-  row[columns.whatsappPhone] = participant.whatsappPhone;
+  row[columns.whatsappPhone] = serializeParticipantContact(
+    participant.whatsappPhone,
+  );
   row[columns.depositStatus] = participant.depositStatus;
   row[columns.depositAmountPaidEgp] = participant.depositAmountPaidEgp;
   row[columns.paymentScreenshotUrl] = participant.paymentScreenshotUrl ?? "";
@@ -1099,11 +1267,19 @@ function participantToRow(
   row[columns.settlementStatus] = participant.settlementStatus;
   row[columns.createdAt] = participant.createdAt;
   row[columns.updatedAt] = participant.updatedAt;
-  row[columns.createdByAdminPhone] = participant.createdByAdminPhone;
-  row[columns.updatedByAdminPhone] = participant.updatedByAdminPhone;
+  row[columns.createdByAdminPhone] = participant.createdByAdminPhone.startsWith("'")
+    ? participant.createdByAdminPhone
+    : `'${participant.createdByAdminPhone}`;
+  row[columns.updatedByAdminPhone] = participant.updatedByAdminPhone.startsWith("'")
+    ? participant.updatedByAdminPhone
+    : `'${participant.updatedByAdminPhone}`;
   row[columns.internalNotes] = participant.internalNotes;
   row[columns.deletedAt] = participant.deletedAt ?? "";
-  row[columns.deletedByAdminPhone] = participant.deletedByAdminPhone ?? "";
+  row[columns.deletedByAdminPhone] = participant.deletedByAdminPhone
+    ? participant.deletedByAdminPhone.startsWith("'")
+      ? participant.deletedByAdminPhone
+      : `'${participant.deletedByAdminPhone}`
+    : "";
 
   return row;
 }
@@ -1273,9 +1449,8 @@ function parseParticipantRow(
       rowIndex,
       MAX_NAME_LENGTH,
     ),
-    whatsappPhone: requireCanonicalPhone(
+    whatsappPhone: normalizeParticipantContact(
       getCell(row, columns, "whatsappPhone"),
-      "WhatsApp phone",
       "CONFIGURATION",
     ),
     depositStatus,
@@ -1858,11 +2033,115 @@ async function reconcileParticipantAddition(
   return addedRow.value;
 }
 
+function sanitizeEventTabName(title: string): string {
+  const cleaned = title.replace(/[:\\/?*\[\]]/g, " ").trim();
+  return (cleaned || "EventTab").slice(0, 100);
+}
+
+export async function getOrEnsureEventSheet(eventName: string): Promise<number> {
+  const tabName = sanitizeEventTabName(eventName);
+  const sheetId = await ensureSheetExists(tabName);
+  const sheets = await getSheetsClient();
+
+  const headerResponse = await withGoogleSheetsRetry(
+    `read ${tabName} headers`,
+    () =>
+      sheets.spreadsheets.values.get({
+        spreadsheetId: GOOGLE_SPREADSHEET_ID,
+        range: `${quoteSheetName(tabName)}!1:1`,
+      }),
+  );
+
+  const existingHeaders = headerResponse.data.values?.[0] ?? [];
+  if (existingHeaders.length === 0) {
+    await withGoogleSheetsRetry(`write ${tabName} headers`, () =>
+      sheets.spreadsheets.values.update({
+        spreadsheetId: GOOGLE_SPREADSHEET_ID,
+        range: `${quoteSheetName(tabName)}!A1:F1`,
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [[...POST_RUN_EVENT_TAB_HEADERS]],
+        },
+      }),
+    );
+  }
+
+  return sheetId;
+}
+
+async function syncParticipantToEventTab(
+  event: PostRunEvent,
+  participant: PostRunParticipant,
+): Promise<void> {
+  const tabName = sanitizeEventTabName(event.title);
+  try {
+    const sheets = await getSheetsClient();
+
+    const formattedPhone = serializeParticipantContact(
+      participant.whatsappPhone,
+    );
+
+    const rowValues = [
+      participant.name,
+      formattedPhone,
+      participant.depositStatus,
+      participant.depositAmountPaidEgp,
+      participant.remainingBalanceEgp,
+      participant.createdAt,
+    ];
+
+    await withGoogleSheetsIdempotentMutationRetry(
+      `append participant to ${tabName} tab`,
+      () =>
+        sheets.spreadsheets.values.append({
+          spreadsheetId: GOOGLE_SPREADSHEET_ID,
+          range: `${quoteSheetName(tabName)}!A:F`,
+          valueInputOption: "RAW",
+          insertDataOption: "INSERT_ROWS",
+          requestBody: {
+            values: [rowValues],
+          },
+        }),
+      async () => {
+        const rowsResponse = await sheets.spreadsheets.values.get({
+          spreadsheetId: GOOGLE_SPREADSHEET_ID,
+          range: `${quoteSheetName(tabName)}!A2:F`,
+        });
+        const rows = rowsResponse.data.values ?? [];
+        return rows.some((row) => {
+          const storedContact = String(row[1] ?? "")
+            .trim()
+            .replace(/^'/, "");
+
+          return (
+            String(row[0] ?? "").trim() === participant.name &&
+            storedContact === participant.whatsappPhone &&
+            String(row[5] ?? "").trim() === participant.createdAt
+          );
+        });
+      },
+    );
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: `Failed to sync participant to event tab "${tabName}". Master ledger recording succeeded.`,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
 export async function listPostRunEvents(
   options: Readonly<{ includeArchived?: boolean }> = {},
 ): Promise<PostRunEvent[]> {
-  const columns = await getPostRunSheetColumns();
-  const rows = await readEventRows(columns.events);
+  const columns = await getExistingEventColumns();
+
+  if (!columns) {
+    return [];
+  }
+
+  const rows = await readEventRows(columns);
 
   return rows
     .map((row) => row.value)
@@ -2392,6 +2671,7 @@ export async function addEventParticipant(
 
     const columns = await getPostRunSheetColumns();
     const event = await requireEvent(normalizedEventId, columns.events);
+    await getOrEnsureEventSheet(event.title);
     const participants = (
       await readParticipantRows(
         event,
@@ -2404,10 +2684,7 @@ export async function addEventParticipant(
       "Participant name",
       MAX_NAME_LENGTH,
     );
-    const whatsappPhone = requireCanonicalPhone(
-      input.whatsappPhone,
-      "WhatsApp phone",
-    );
+    const whatsappPhone = normalizeParticipantContact(input.whatsappPhone);
 
     if (
       event.maxCapacity !== null &&
@@ -2420,14 +2697,16 @@ export async function addEventParticipant(
     }
 
     if (
+      whatsappPhone &&
       participants.some(
         (participant) =>
-          participant.value.whatsappPhone === whatsappPhone,
+          participant.value.whatsappPhone.toLocaleLowerCase("en-US") ===
+          whatsappPhone.toLocaleLowerCase("en-US"),
       )
     ) {
       throw new PostRunEventsError(
         "CONFLICT",
-        "This phone number is already registered for the event.",
+        "This phone number or username is already registered for the event.",
       );
     }
 
@@ -2497,7 +2776,9 @@ export async function addEventParticipant(
       },
     );
 
-    return reconcileParticipantAddition(event, participant, columns);
+    const reconciled = await reconcileParticipantAddition(event, participant, columns);
+    await syncParticipantToEventTab(event, reconciled);
+    return reconciled;
   });
 }
 

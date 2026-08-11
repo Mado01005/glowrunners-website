@@ -1,6 +1,9 @@
 .next
 node_modules
 credentials.json
+.venv/
+__pycache__/
+*.py[cod]
 .env*.local
 dist
 *.tsbuildinfo

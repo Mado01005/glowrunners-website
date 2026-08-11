@@ -1,0 +1,4 @@
+interface:
+  display_name: "GlowRunners Engine"
+  short_description: "GlowRunners architecture and operations rules"
+  default_prompt: "Use $glowrunners-engine to audit or implement GlowRunners admin, Sheets, and payment logic."

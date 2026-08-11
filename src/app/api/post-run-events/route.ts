@@ -9,16 +9,16 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   try {
-    return await handleListPostRunEvents(request);
+    return await handleListPostRunEvents(request, { bareEvents: true });
   } catch (error) {
-    return postRunErrorResponse(error, "/api/events");
+    return postRunErrorResponse(error, "/api/post-run-events");
   }
 }
 
 export async function POST(request: Request) {
   try {
-    return await handleCreatePostRunEvent(request, "/api/events");
+    return await handleCreatePostRunEvent(request, "/api/post-run-events");
   } catch (error) {
-    return postRunErrorResponse(error, "/api/events");
+    return postRunErrorResponse(error, "/api/post-run-events");
   }
 }
