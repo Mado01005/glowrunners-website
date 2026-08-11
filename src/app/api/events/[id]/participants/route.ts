@@ -74,15 +74,21 @@ export async function POST(
     );
   }
 
+  const rawContact =
+    body.phoneNumber ??
+    body.phone_number ??
+    body.whatsappPhone ??
+    body.whatsapp_phone ??
+    body.whatsapp ??
+    body.username ??
+    "";
+
   const input: PostRunParticipantInput = {
     name:
       typeof (body.fullName ?? body.full_name) === "string"
         ? String(body.fullName ?? body.full_name)
         : "",
-    whatsappPhone:
-      typeof (body.phoneNumber ?? body.phone_number) === "string"
-        ? String(body.phoneNumber ?? body.phone_number)
-        : "",
+    whatsappPhone: typeof rawContact === "string" ? rawContact : "",
     depositStatus:
       body.depositStatus === "VERIFIED" ||
       body.deposit_status === "VERIFIED"

@@ -673,7 +673,7 @@ function normalizeParticipantContact(
   value: unknown,
   errorKind: "CONFIGURATION" | "VALIDATION" = "VALIDATION",
 ): string {
-  if (value === null || value === undefined || String(value).trim() === "") {
+  if (value === null || value === undefined) {
     return "";
   }
 
@@ -685,6 +685,10 @@ function normalizeParticipantContact(
   }
 
   const contact = value.trim();
+
+  if (!contact || contact === "-") {
+    return "";
+  }
 
   if (contact.length > MAX_CONTACT_LENGTH) {
     throw new PostRunEventsError(
@@ -1989,12 +1993,19 @@ async function reconcileParticipantAddition(
   const duplicateRows: ParticipantRow[] = [];
 
   for (const row of rows) {
-    if (seenPhones.has(row.value.whatsappPhone)) {
+    const contactKey = row.value.whatsappPhone.trim().toLocaleLowerCase("en-US");
+
+    if (!contactKey || contactKey === "-") {
+      uniquePhoneRows.push(row);
+      continue;
+    }
+
+    if (seenPhones.has(contactKey)) {
       duplicateRows.push(row);
       continue;
     }
 
-    seenPhones.add(row.value.whatsappPhone);
+    seenPhones.add(contactKey);
     uniquePhoneRows.push(row);
   }
 
@@ -2013,11 +2024,18 @@ async function reconcileParticipantAddition(
   const addedRow = rows.find((row) => row.value.id === participant.id);
 
   if (!addedRow || loserRows.some((row) => row.value.id === participant.id)) {
-    const phoneWinner = uniquePhoneRows.find(
-      (row) => row.value.whatsappPhone === participant.whatsappPhone,
-    );
+    const participantContactKey = participant.whatsappPhone
+      .trim()
+      .toLocaleLowerCase("en-US");
+    const phoneWinner = participantContactKey
+      ? uniquePhoneRows.find(
+          (row) =>
+            row.value.whatsappPhone.trim().toLocaleLowerCase("en-US") ===
+            participantContactKey,
+        )
+      : undefined;
 
-    if (phoneWinner?.value.id !== participant.id) {
+    if (participantContactKey && phoneWinner?.value.id !== participant.id) {
       throw new PostRunEventsError(
         "CONFLICT",
         "This phone number was registered by another request first.",
