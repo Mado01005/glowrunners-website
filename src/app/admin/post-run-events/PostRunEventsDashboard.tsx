@@ -1208,7 +1208,7 @@ export function PostRunEventsDashboard() {
       }
 
       const created = payload.participant as Participant;
-      setParticipants((current) => [created, ...current]);
+      setParticipants((current) => [...current, created]);
       setParticipantForm(EMPTY_PARTICIPANT_FORM);
       setNotice({
         tone: "success",

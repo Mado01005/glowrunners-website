@@ -669,6 +669,41 @@ function requireCanonicalPhone(
   return `+20${phone}`;
 }
 
+export function normalizeContactInput(
+  input: string | null | undefined,
+): string {
+  if (!input || typeof input !== "string") {
+    return "";
+  }
+
+  const trimmed = input.trim().replace(/^'/, "").trim();
+
+  if (!trimmed || trimmed === "-") {
+    return "";
+  }
+
+  if (trimmed.startsWith("@")) {
+    return trimmed;
+  }
+
+  const hasLeadingPlus = trimmed.startsWith("+");
+  const digitsOnly = trimmed.replace(/\D/g, "");
+
+  if (!digitsOnly) {
+    return "";
+  }
+
+  if (hasLeadingPlus) {
+    return `+${digitsOnly}`;
+  }
+
+  if (digitsOnly.startsWith("01") && digitsOnly.length === 11) {
+    return `+20${digitsOnly.slice(1)}`;
+  }
+
+  return digitsOnly.length >= 8 ? `+${digitsOnly}` : digitsOnly;
+}
+
 function normalizeParticipantContact(
   value: unknown,
   errorKind: "CONFIGURATION" | "VALIDATION" = "VALIDATION",
@@ -684,17 +719,23 @@ function normalizeParticipantContact(
     );
   }
 
-  const contact = value.trim();
+  const rawContact = value.trim();
 
-  if (!contact || contact === "-") {
+  if (!rawContact || rawContact === "-") {
     return "";
   }
 
-  if (contact.length > MAX_CONTACT_LENGTH) {
+  if (rawContact.length > MAX_CONTACT_LENGTH) {
     throw new PostRunEventsError(
       errorKind,
       `WhatsApp phone or @username must be at most ${MAX_CONTACT_LENGTH} characters.`,
     );
+  }
+
+  const contact = normalizeContactInput(rawContact);
+
+  if (!contact) {
+    return "";
   }
 
   if (contact.startsWith("@")) {
@@ -708,22 +749,7 @@ function normalizeParticipantContact(
     return contact;
   }
 
-  const egyptianPhone = normalizeEgyptianMobilePhone(contact);
-
-  if (egyptianPhone !== null) {
-    return `+20${egyptianPhone}`;
-  }
-
-  const internationalPhone = contact.replace(/[\s().-]/g, "");
-
-  if (/^\+[1-9]\d{7,14}$/.test(internationalPhone)) {
-    return internationalPhone;
-  }
-
-  throw new PostRunEventsError(
-    errorKind,
-    "WhatsApp contact must be an Egyptian/international phone number, an @username, or blank.",
-  );
+  return contact;
 }
 
 function serializeParticipantContact(value: string): string {
