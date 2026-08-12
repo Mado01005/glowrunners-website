@@ -686,6 +686,10 @@ export function normalizeContactInput(
     return trimmed;
   }
 
+  if (/[a-z]/i.test(trimmed)) {
+    return `@${trimmed}`;
+  }
+
   const hasLeadingPlus = trimmed.startsWith("+");
   const digitsOnly = trimmed.replace(/\D/g, "");
 
