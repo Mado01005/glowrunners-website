@@ -682,12 +682,10 @@ export function normalizeContactInput(
     return "";
   }
 
-  if (trimmed.startsWith("@")) {
-    return trimmed;
-  }
+  const isHandle = trimmed.startsWith("@") || /[a-z._-]/i.test(trimmed);
 
-  if (/[a-z]/i.test(trimmed)) {
-    return `@${trimmed}`;
+  if (isHandle) {
+    return trimmed.startsWith("@") ? trimmed : `@${trimmed}`;
   }
 
   const hasLeadingPlus = trimmed.startsWith("+");
@@ -743,13 +741,6 @@ function normalizeParticipantContact(
   }
 
   if (contact.startsWith("@")) {
-    if (!/^@[^\s@]+$/u.test(contact)) {
-      throw new PostRunEventsError(
-        errorKind,
-        "WhatsApp username must start with @ and contain no spaces.",
-      );
-    }
-
     return contact;
   }
 
@@ -988,7 +979,11 @@ async function findSheetProperties(sheetName: string) {
 
   return (
     response.data.sheets?.find(
-      (sheet) => sheet.properties?.title === sheetName,
+      (sheet) =>
+        sheet.properties?.title
+          ?.trim()
+          .toLocaleLowerCase("en-US") ===
+        sheetName.trim().toLocaleLowerCase("en-US"),
     )?.properties ?? null
   );
 }
