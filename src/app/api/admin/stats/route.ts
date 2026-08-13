@@ -3,6 +3,7 @@ import { getAdminSessionFromRequest } from "@/lib/adminAuth";
 import {
   emptyGateDashboard,
   getGateDashboardData,
+  invalidateGateDashboardCache,
   isMissingAttendanceDataError,
   isRateLimitedSheetsError,
   type GateDashboardData,
@@ -37,6 +38,7 @@ function responseBody(
     changeOwed: dashboard.changeOwed,
     owedRunnerRows: dashboard.owedRunnerRows,
     roster: dashboard.roster,
+    eventSettings: dashboard.eventSettings,
     ...(warning ? { warning } : {}),
   };
 }
@@ -52,6 +54,10 @@ export async function GET(request: Request) {
   }
 
   try {
+    if (new URL(request.url).searchParams.get("force") === "1") {
+      invalidateGateDashboardCache();
+    }
+
     const dashboard = await getGateDashboardData();
     return NextResponse.json(responseBody(dashboard), {
       headers: NO_STORE_HEADERS,

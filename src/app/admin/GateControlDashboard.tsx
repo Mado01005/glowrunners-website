@@ -18,6 +18,15 @@ type RosterEntry = Readonly<{
   phone: string;
   paymentType: string;
   status: string;
+  amountPaid: number;
+  balanceOwed: number;
+}>;
+
+type GateEventSettings = Readonly<{
+  title: string;
+  eventDate: string;
+  eventTime: string;
+  location: string;
 }>;
 
 type Dashboard = Readonly<{
@@ -32,6 +41,7 @@ type Dashboard = Readonly<{
   changeOwed: number;
   owedRunnerRows: readonly number[];
   roster: readonly RosterEntry[];
+  eventSettings: GateEventSettings | null;
 }>;
 
 type ActiveAdmin = Readonly<{
@@ -103,6 +113,23 @@ type WalkIn = Readonly<{
 }>;
 
 type RosterFilter = "total" | "confirmed" | "pending" | "owed";
+type RunnerStatusDraft =
+  | "CONFIRMED"
+  | "DEPOSIT_PAID"
+  | "PENDING"
+  | "OWED"
+  | "FREE";
+type RunnerEditDraft = {
+  rowIndex: number;
+  expectedName: string;
+  expectedPhone: string;
+  name: string;
+  phone: string;
+  paymentType: string;
+  status: RunnerStatusDraft;
+  amountPaid: string;
+  balanceOwed: string;
+};
 type Feedback = Readonly<{
   tone: "idle" | "success" | "error";
   message: string;
@@ -120,6 +147,7 @@ const INITIAL_DASHBOARD: Dashboard = {
   changeOwed: 0,
   owedRunnerRows: [],
   roster: [],
+  eventSettings: null,
 };
 
 const SCANNER_ID = "glowrunners-gate-scanner";
@@ -169,6 +197,28 @@ function isConfirmed(runner: RosterEntry): boolean {
   return isConfirmedAttendanceStatus(runner.status);
 }
 
+function runnerStatusDraft(status: string): RunnerStatusDraft {
+  const normalized = status.trim().toLocaleUpperCase("en-US");
+
+  if (isConfirmedAttendanceStatus(status)) {
+    return "CONFIRMED";
+  }
+
+  if (normalized === "FREE") {
+    return "FREE";
+  }
+
+  if (normalized === "OWED") {
+    return "OWED";
+  }
+
+  if (normalized.includes("DEPOSIT")) {
+    return "DEPOSIT_PAID";
+  }
+
+  return "PENDING";
+}
+
 function isCash(method: string): boolean {
   const normalized = method.trim().toLocaleLowerCase("en-US");
 
@@ -195,7 +245,7 @@ function parseRoster(value: unknown): RosterEntry[] {
     const phone =
       typeof candidate.phone === "string" ? candidate.phone.trim() : "";
 
-    if (!Number.isSafeInteger(rowIndex) || rowIndex < 1 || !name || !phone) {
+    if (!Number.isSafeInteger(rowIndex) || rowIndex < 1 || !name) {
       return [];
     }
 
@@ -203,7 +253,7 @@ function parseRoster(value: unknown): RosterEntry[] {
       {
         rowIndex,
         name: name.slice(0, 100),
-        phone: normalizePhone(phone),
+        phone: phone.slice(0, 80),
         paymentType:
           typeof candidate.paymentType === "string"
             ? candidate.paymentType.trim().slice(0, 40)
@@ -212,6 +262,8 @@ function parseRoster(value: unknown): RosterEntry[] {
           typeof candidate.status === "string"
             ? candidate.status.trim().slice(0, 40)
             : "",
+        amountPaid: Math.max(0, Number(candidate.amountPaid) || 0),
+        balanceOwed: Math.max(0, Number(candidate.balanceOwed) || 0),
       },
     ];
   });
@@ -256,6 +308,19 @@ function parseDashboard(value: unknown): Dashboard | null {
           )
       : [],
     roster: parseRoster(value.roster),
+    eventSettings:
+      isRecord(value.eventSettings) &&
+      typeof value.eventSettings.title === "string" &&
+      typeof value.eventSettings.eventDate === "string" &&
+      typeof value.eventSettings.eventTime === "string" &&
+      typeof value.eventSettings.location === "string"
+        ? {
+            title: value.eventSettings.title,
+            eventDate: value.eventSettings.eventDate,
+            eventTime: value.eventSettings.eventTime,
+            location: value.eventSettings.location,
+          }
+        : null,
   };
 }
 
@@ -401,6 +466,10 @@ function eventDateLabels(sheetName: string) {
   const ordinalSuffix = ordinal(day)
     .slice(String(day).length)
     .toLocaleLowerCase("en-US");
+  const parsedEventDate = new Date(`${month} ${day}, ${year} 12:00:00 UTC`);
+  const resolvedEventDate = Number.isNaN(parsedEventDate.getTime())
+    ? localNoonUtc
+    : parsedEventDate;
 
   return {
     badge: `${weekday.slice(0, 3).toUpperCase()} - ${ordinal(day)} OF ${month.toUpperCase()}`,
@@ -408,7 +477,33 @@ function eventDateLabels(sheetName: string) {
     kickoff: isTuesday ? "6:00 AM" : "8:00 AM",
     location: isTuesday ? "Stanley bridge" : "Kafr abdo",
     report: `${weekday} ${day}${ordinalSuffix} ${month}`,
+    eventDate: resolvedEventDate.toISOString().slice(0, 10),
+    title: `GlowRunners ${weekday.toUpperCase()}`,
   };
+}
+
+function formatEventTime(value: string): string {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+
+  if (!match) {
+    return value;
+  }
+
+  const hour = Number(match[1]);
+  const suffix = hour >= 12 ? "PM" : "AM";
+  return `${hour % 12 || 12}:${match[2]} ${suffix}`;
+}
+
+function displayContact(value: string): string {
+  if (!value.trim()) {
+    return "No contact";
+  }
+
+  if (value.startsWith("@") || value.startsWith("+")) {
+    return value;
+  }
+
+  return /^\d+$/.test(value) ? `0${value}` : value;
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -471,6 +566,18 @@ export function GateControlDashboard() {
     useState<"Cash" | "Digital">("Cash");
   const [isExpenseSaving, setIsExpenseSaving] = useState(false);
   const [isWalkInSaving, setIsWalkInSaving] = useState(false);
+  const [isEventSettingsOpen, setIsEventSettingsOpen] = useState(false);
+  const [eventSettingsDraft, setEventSettingsDraft] =
+    useState<GateEventSettings>({
+      title: "",
+      eventDate: "",
+      eventTime: "",
+      location: "",
+    });
+  const [runnerEditDraft, setRunnerEditDraft] =
+    useState<RunnerEditDraft | null>(null);
+  const [isEventSettingsSaving, setIsEventSettingsSaving] = useState(false);
+  const [isRunnerSaving, setIsRunnerSaving] = useState(false);
   const syncInFlightRef = useRef(false);
   const mountedRef = useRef(true);
   const scanHandlerRef = useRef<(decoded: string) => void>(() => undefined);
@@ -482,6 +589,35 @@ export function GateControlDashboard() {
     () => eventDateLabels(dashboard.sheetName),
     [dashboard.sheetName],
   );
+  const eventSettings = dashboard.eventSettings ?? {
+    title: dateLabels.title,
+    eventDate: dateLabels.eventDate,
+    eventTime: dateLabels.day === "Tuesday" ? "06:00" : "08:00",
+    location: dateLabels.location,
+  };
+  const eventDateDisplay = useMemo(() => {
+    const parsed = new Date(`${eventSettings.eventDate}T12:00:00`);
+
+    if (Number.isNaN(parsed.getTime())) {
+      return { badge: dateLabels.badge, day: dateLabels.day };
+    }
+
+    return {
+      badge: new Intl.DateTimeFormat("en-US", {
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        timeZone: "Africa/Cairo",
+      })
+        .format(parsed)
+        .toLocaleUpperCase("en-US"),
+      day: new Intl.DateTimeFormat("en-US", {
+        weekday: "long",
+        timeZone: "Africa/Cairo",
+      }).format(parsed),
+    };
+  }, [dateLabels.badge, dateLabels.day, eventSettings.eventDate]);
 
   const handleUnauthorized = useCallback((response: Response) => {
     if (response.status !== 401 && response.status !== 403) {
@@ -502,11 +638,14 @@ export function GateControlDashboard() {
     return true;
   }, []);
 
-  const refreshDashboard = useCallback(async () => {
+  const refreshDashboard = useCallback(async (force = false) => {
     setIsRefreshing(true);
 
     try {
-      const response = await fetch("/api/admin/stats", { cache: "no-store" });
+      const response = await fetch(
+        force ? "/api/admin/stats?force=1" : "/api/admin/stats",
+        { cache: "no-store" },
+      );
       const payload = await readJson(response);
 
       if (handleUnauthorized(response)) {
@@ -521,6 +660,17 @@ export function GateControlDashboard() {
 
       if (mountedRef.current) {
         setDashboard(parsed);
+        if (force) {
+          const runnerByRow = new Map(
+            parsed.roster.map((runner) => [runner.rowIndex, runner]),
+          );
+          setOfflineQueue((current) =>
+            current.filter((item) => {
+              const runner = runnerByRow.get(item.runnerRow);
+              return runner !== undefined && !isConfirmed(runner);
+            }),
+          );
+        }
         setFeedback((current) =>
           current.tone === "error" &&
           current.message.includes("gate statistics")
@@ -1218,7 +1368,9 @@ export function GateControlDashboard() {
   const queuedPhones = useMemo(
     () =>
       new Set(
-        queuedPendingItems.map((item) => normalizePhone(item.phone)),
+        queuedPendingItems
+          .map((item) => normalizePhone(item.phone))
+          .filter(Boolean),
       ),
     [queuedPendingItems],
   );
@@ -1283,7 +1435,12 @@ export function GateControlDashboard() {
           return false;
         }
 
-        if (rosterFilter === "owed" && !owedRows.has(runner.rowIndex)) {
+        if (
+          rosterFilter === "owed" &&
+          !owedRows.has(runner.rowIndex) &&
+          runner.balanceOwed <= 0 &&
+          runner.status.trim().toLocaleUpperCase("en-US") !== "OWED"
+        ) {
           return false;
         }
 
@@ -1480,6 +1637,214 @@ export function GateControlDashboard() {
     }
   };
 
+  const openEventSettings = () => {
+    setEventSettingsDraft(eventSettings);
+    setIsEventSettingsOpen(true);
+  };
+
+  const saveEventSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (isEventSettingsSaving) {
+      return;
+    }
+
+    setIsEventSettingsSaving(true);
+
+    try {
+      const response = await fetch("/api/admin/event-settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(eventSettingsDraft),
+      });
+      const payload = await readJson(response);
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
+
+      if (!response.ok || !isRecord(payload) || !isRecord(payload.settings)) {
+        throw new Error(readError(payload, "Unable to save event settings."));
+      }
+
+      const saved: GateEventSettings = {
+        title: String(payload.settings.title ?? ""),
+        eventDate: String(payload.settings.eventDate ?? ""),
+        eventTime: String(payload.settings.eventTime ?? ""),
+        location: String(payload.settings.location ?? ""),
+      };
+      setDashboard((current) => ({ ...current, eventSettings: saved }));
+      setIsEventSettingsOpen(false);
+      setFeedback({ tone: "success", message: "Event details updated." });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unable to save event settings.",
+      });
+    } finally {
+      setIsEventSettingsSaving(false);
+    }
+  };
+
+  const openRunnerEditor = (runner: RosterEntry) => {
+    setRunnerEditDraft({
+      rowIndex: runner.rowIndex,
+      expectedName: runner.name,
+      expectedPhone: runner.phone,
+      name: runner.name,
+      phone: runner.phone,
+      paymentType: runner.paymentType,
+      status: runnerStatusDraft(runner.status),
+      amountPaid: String(runner.amountPaid),
+      balanceOwed: String(runner.balanceOwed),
+    });
+  };
+
+  const replaceRunnerInDashboard = (runner: RosterEntry) => {
+    setDashboard((current) => {
+      const roster = current.roster.map((candidate) =>
+        candidate.rowIndex === runner.rowIndex ? runner : candidate,
+      );
+      const confirmed = roster.filter(isConfirmed).length;
+
+      return {
+        ...current,
+        roster,
+        confirmed: confirmed + current.walkInCount,
+        pending: Math.max(0, roster.length - confirmed),
+        total: roster.length + current.walkInCount,
+      };
+    });
+  };
+
+  const saveRunner = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!runnerEditDraft || isRunnerSaving) {
+      return;
+    }
+
+    setIsRunnerSaving(true);
+
+    try {
+      const response = await fetch("/api/admin/roster", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...runnerEditDraft,
+          amountPaid: Number(runnerEditDraft.amountPaid),
+          balanceOwed: Number(runnerEditDraft.balanceOwed),
+        }),
+      });
+      const payload = await readJson(response);
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
+
+      const updated =
+        response.ok && isRecord(payload)
+          ? parseRoster([payload.runner])[0]
+          : undefined;
+
+      if (!updated) {
+        throw new Error(readError(payload, "Unable to update runner."));
+      }
+
+      replaceRunnerInDashboard(updated);
+      setRunnerEditDraft(null);
+      setFeedback({
+        tone: "success",
+        message: `${updated.name} was updated.`,
+      });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to update runner.",
+      });
+    } finally {
+      setIsRunnerSaving(false);
+    }
+  };
+
+  const deleteRunner = async () => {
+    if (!runnerEditDraft || isRunnerSaving) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Are you sure you want to permanently remove ${runnerEditDraft.name} from this event?`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsRunnerSaving(true);
+
+    try {
+      const response = await fetch("/api/admin/roster", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rowIndex: runnerEditDraft.rowIndex,
+          expectedName: runnerEditDraft.expectedName,
+          expectedPhone: runnerEditDraft.expectedPhone,
+        }),
+      });
+      const payload = await readJson(response);
+
+      if (handleUnauthorized(response)) {
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(readError(payload, "Unable to delete runner."));
+      }
+
+      const deletedRow = runnerEditDraft.rowIndex;
+      setDashboard((current) => {
+        const roster = current.roster
+          .filter((runner) => runner.rowIndex !== deletedRow)
+          .map((runner) =>
+            runner.rowIndex > deletedRow
+              ? { ...runner, rowIndex: runner.rowIndex - 1 }
+              : runner,
+          );
+        const confirmedCount = roster.filter(isConfirmed).length;
+
+        return {
+          ...current,
+          roster,
+          confirmed: confirmedCount + current.walkInCount,
+          pending: Math.max(0, roster.length - confirmedCount),
+          total: roster.length + current.walkInCount,
+        };
+      });
+      setOfflineQueue((current) =>
+        current.filter((item) => item.runnerRow !== deletedRow),
+      );
+      setRunnerEditDraft(null);
+      setFeedback({
+        tone: "success",
+        message: `${runnerEditDraft.name} was permanently removed.`,
+      });
+      void refreshDashboard(true);
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message:
+          error instanceof Error ? error.message : "Unable to delete runner.",
+      });
+    } finally {
+      setIsRunnerSaving(false);
+    }
+  };
+
   const copyGateReport = async () => {
     const cashExpenses = expenses.reduce(
       (sum, expense) =>
@@ -1498,7 +1863,10 @@ export function GateControlDashboard() {
       dashboard.confirmed - dashboard.walkInCount + queuedNewCount,
     );
     const report = [
-      `📊 GlowRunners Meetup Report – ${dateLabels.report}`,
+      `📊 GlowRunners Meetup Report – ${eventSettings.title}`,
+      `📅 ${eventSettings.eventDate}`,
+      `🕒 ${formatEventTime(eventSettings.eventTime)}`,
+      `📍 ${eventSettings.location}`,
       `👥 Total Attendees: ${displayedConfirmed} (${registeredConfirmed} Pre-registered, ${dashboard.walkInCount} Walk-ins)`,
       `💵 Total Cash Collected: ${money(displayedCash)}`,
       `💳 Digital Revenue: ${money(displayedDigital)}`,
@@ -1563,7 +1931,7 @@ export function GateControlDashboard() {
       <main className="flex w-full max-w-md min-w-0 flex-col gap-4 py-4 pb-10">
         <header className="flex min-w-0 flex-col items-center gap-3 text-center">
           <div className="self-end rounded-full border border-white/15 bg-white/[0.06] px-3 py-2 text-[10px] font-black tracking-[0.14em] text-zinc-200">
-            📅 {dateLabels.badge}
+            📅 {eventDateDisplay.badge}
           </div>
           <div className="min-w-0">
             <p className="bg-gradient-to-r from-[#ff5f8f] to-[#ffc865] bg-clip-text text-3xl font-black tracking-tight text-transparent">
@@ -1613,10 +1981,22 @@ export function GateControlDashboard() {
           aria-label="Event information"
           className="grid min-w-0 grid-cols-3 gap-2"
         >
+          <button
+            type="button"
+            onClick={openEventSettings}
+            className="col-span-3 flex min-h-12 min-w-0 items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#151515] px-3 text-left"
+          >
+            <span className="min-w-0 truncate text-sm font-black">
+              {eventSettings.title}
+            </span>
+            <span className="shrink-0 text-[10px] font-black text-pink-300">
+              Edit event
+            </span>
+          </button>
           {[
-            ["KICKOFF", dateLabels.kickoff],
-            ["LOCATION", dateLabels.location],
-            ["DAY", dateLabels.day],
+            ["KICKOFF", formatEventTime(eventSettings.eventTime)],
+            ["LOCATION", eventSettings.location],
+            ["DAY", eventDateDisplay.day],
           ].map(([label, value]) => (
             <div
               key={label}
@@ -1726,13 +2106,13 @@ export function GateControlDashboard() {
             <div className="min-w-0">
               <h2 className="text-lg font-black">Roster Explorer</h2>
               <p className="mt-1 truncate text-[11px] text-zinc-500">
-                {dashboard.sheetName}
+                {formatEventTime(eventSettings.eventTime)} · {eventSettings.location}
                 {dashboard.isFallbackSheet ? " · fallback tab" : ""}
               </p>
             </div>
             <button
               type="button"
-              onClick={() => void refreshDashboard()}
+              onClick={() => void refreshDashboard(true)}
               disabled={isRefreshing}
               className="min-h-11 shrink-0 rounded-lg border border-white/10 px-3 text-xs font-black text-zinc-300 disabled:opacity-60"
             >
@@ -1791,13 +2171,30 @@ export function GateControlDashboard() {
                     key={`${runner.rowIndex}:${runner.phone}`}
                     className="flex min-w-0 items-center gap-3 rounded-xl border border-white/10 bg-black/40 p-3"
                   >
-                    <div className="min-w-0 flex-1">
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => openRunnerEditor(runner)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openRunnerEditor(runner);
+                        }
+                      }}
+                      className="min-w-0 flex-1 rounded-lg outline-none focus:ring-2 focus:ring-pink-400"
+                      aria-label={`Edit ${runner.name}`}
+                    >
                       <p className="truncate text-sm font-black">
                         {runner.name}
                       </p>
                       <p className="mt-1 truncate text-[11px] text-zinc-500">
-                        0{runner.phone} · {runner.paymentType}
+                        {displayContact(runner.phone)} · {runner.paymentType}
                       </p>
+                      {runner.amountPaid > 0 || runner.balanceOwed > 0 ? (
+                        <p className="mt-1 truncate text-[10px] font-bold text-zinc-400">
+                          {money(runner.amountPaid)} paid · {money(runner.balanceOwed)} owed
+                        </p>
+                      ) : null}
                       {lockedByAnother ? (
                         <p className="mt-1 truncate text-[10px] font-bold text-amber-300">
                           ⚡ {lock.adminName} is processing…
@@ -1810,7 +2207,10 @@ export function GateControlDashboard() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => void beginPayment(runner)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void beginPayment(runner);
+                      }}
                       disabled={confirmed || Boolean(lockedByAnother)}
                       className={`min-h-11 shrink-0 rounded-lg px-3 text-xs font-black ${
                         confirmed
@@ -1851,8 +2251,13 @@ export function GateControlDashboard() {
           </div>
           <button
             type="button"
-            onClick={() => void syncOfflineQueue()}
-            disabled={offlineQueue.length === 0}
+            onClick={() =>
+              void (async () => {
+                await syncOfflineQueue();
+                await refreshDashboard(true);
+              })()
+            }
+            disabled={isRefreshing}
             className="min-h-11 shrink-0 rounded-lg border border-sky-300/20 px-3 text-[11px] font-black text-sky-200 disabled:opacity-40"
           >
             Sync now
@@ -2028,6 +2433,274 @@ export function GateControlDashboard() {
           GLOWRUNNERS GATE CONTROL · ORGANISER ONLY
         </footer>
       </main>
+
+      {isEventSettingsOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="event-settings-title"
+          className="fixed inset-0 z-50 flex items-end justify-center overflow-x-hidden bg-black/85 p-3 backdrop-blur-sm sm:items-center"
+        >
+          <form
+            onSubmit={saveEventSettings}
+            className="w-full max-w-md min-w-0 rounded-2xl border border-white/15 bg-[#141414] p-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2 id="event-settings-title" className="text-xl font-black">
+                  Edit Event Settings
+                </h2>
+                <p className="mt-1 truncate text-xs text-zinc-500">
+                  {dashboard.sheetName}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEventSettingsOpen(false)}
+                className="min-h-11 min-w-11 rounded-xl border border-white/10 text-lg"
+                aria-label="Close event settings"
+              >
+                ×
+              </button>
+            </div>
+            <div className="mt-4 flex min-w-0 flex-col gap-3">
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                EVENT TITLE
+                <input
+                  required
+                  maxLength={120}
+                  value={eventSettingsDraft.title}
+                  onChange={(event) =>
+                    setEventSettingsDraft((current) => ({
+                      ...current,
+                      title: event.target.value,
+                    }))
+                  }
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-pink-400"
+                />
+              </label>
+              <div className="grid min-w-0 grid-cols-2 gap-2">
+                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                  EVENT DATE
+                  <input
+                    required
+                    type="date"
+                    value={eventSettingsDraft.eventDate}
+                    onChange={(event) =>
+                      setEventSettingsDraft((current) => ({
+                        ...current,
+                        eventDate: event.target.value,
+                      }))
+                    }
+                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white"
+                  />
+                </label>
+                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                  EVENT TIME
+                  <input
+                    required
+                    type="time"
+                    value={eventSettingsDraft.eventTime}
+                    onChange={(event) =>
+                      setEventSettingsDraft((current) => ({
+                        ...current,
+                        eventTime: event.target.value,
+                      }))
+                    }
+                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white"
+                  />
+                </label>
+              </div>
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                EVENT LOCATION / MEETING POINT
+                <input
+                  required
+                  maxLength={180}
+                  value={eventSettingsDraft.location}
+                  onChange={(event) =>
+                    setEventSettingsDraft((current) => ({
+                      ...current,
+                      location: event.target.value,
+                    }))
+                  }
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-pink-400"
+                />
+              </label>
+            </div>
+            <div className="mt-4 grid min-w-0 grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setIsEventSettingsOpen(false)}
+                disabled={isEventSettingsSaving}
+                className="min-h-12 rounded-xl border border-white/15 text-sm font-black text-zinc-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isEventSettingsSaving}
+                className="min-h-12 rounded-xl bg-pink-500 px-3 text-sm font-black text-white disabled:opacity-60"
+              >
+                {isEventSettingsSaving ? "Saving…" : "Save Event"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {runnerEditDraft ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="runner-edit-title"
+          className="fixed inset-0 z-50 flex items-end justify-center overflow-x-hidden bg-black/85 p-3 backdrop-blur-sm sm:items-center"
+        >
+          <form
+            onSubmit={saveRunner}
+            className="max-h-[calc(100dvh-1.5rem)] w-full max-w-md min-w-0 overflow-y-auto rounded-2xl border border-white/15 bg-[#141414] p-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2 id="runner-edit-title" className="text-xl font-black">
+                  Edit Runner
+                </h2>
+                <p className="mt-1 text-xs text-zinc-500">
+                  Attendance row {runnerEditDraft.rowIndex}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRunnerEditDraft(null)}
+                className="min-h-11 min-w-11 rounded-xl border border-white/10 text-lg"
+                aria-label="Close runner editor"
+              >
+                ×
+              </button>
+            </div>
+            <div className="mt-4 flex min-w-0 flex-col gap-3">
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                FULL NAME
+                <input
+                  required
+                  maxLength={100}
+                  value={runnerEditDraft.name}
+                  onChange={(event) =>
+                    setRunnerEditDraft((current) =>
+                      current ? { ...current, name: event.target.value } : null,
+                    )
+                  }
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-pink-400"
+                />
+              </label>
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                WHATSAPP PHONE OR @HANDLE
+                <input
+                  maxLength={80}
+                  value={runnerEditDraft.phone}
+                  onChange={(event) =>
+                    setRunnerEditDraft((current) =>
+                      current ? { ...current, phone: event.target.value } : null,
+                    )
+                  }
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-pink-400"
+                />
+              </label>
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                PAYMENT / GATE STATUS
+                <select
+                  value={runnerEditDraft.status}
+                  onChange={(event) => {
+                    const status = event.target.value as RunnerStatusDraft;
+                    setRunnerEditDraft((current) =>
+                      current
+                        ? {
+                            ...current,
+                            status,
+                            ...(status === "FREE"
+                              ? { amountPaid: "0", balanceOwed: "0" }
+                              : {}),
+                          }
+                        : null,
+                    );
+                  }}
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white"
+                >
+                  <option value="CONFIRMED">Confirmed / Cleared</option>
+                  <option value="DEPOSIT_PAID">Pending / Deposit Paid</option>
+                  <option value="PENDING">Pending / Unpaid</option>
+                  <option value="OWED">Owed</option>
+                  <option value="FREE">Free</option>
+                </select>
+              </label>
+              <div className="grid min-w-0 grid-cols-2 gap-2">
+                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                  AMOUNT PAID
+                  <input
+                    type="number"
+                    min={0}
+                    max={1_000_000}
+                    step="0.01"
+                    disabled={runnerEditDraft.status === "FREE"}
+                    value={runnerEditDraft.amountPaid}
+                    onChange={(event) =>
+                      setRunnerEditDraft((current) =>
+                        current
+                          ? { ...current, amountPaid: event.target.value }
+                          : null,
+                      )
+                    }
+                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white disabled:opacity-50"
+                  />
+                </label>
+                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-500">
+                  BALANCE OWED
+                  <input
+                    type="number"
+                    min={0}
+                    max={1_000_000}
+                    step="0.01"
+                    disabled={runnerEditDraft.status === "FREE"}
+                    value={runnerEditDraft.balanceOwed}
+                    onChange={(event) =>
+                      setRunnerEditDraft((current) =>
+                        current
+                          ? { ...current, balanceOwed: event.target.value }
+                          : null,
+                      )
+                    }
+                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white disabled:opacity-50"
+                  />
+                </label>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void deleteRunner()}
+              disabled={isRunnerSaving}
+              className="mt-4 min-h-12 w-full rounded-xl border border-red-400/30 bg-red-500/10 px-4 text-sm font-black text-red-300 disabled:opacity-60"
+            >
+              🗑️ Delete Runner
+            </button>
+            <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setRunnerEditDraft(null)}
+                disabled={isRunnerSaving}
+                className="min-h-12 rounded-xl border border-white/15 text-sm font-black text-zinc-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isRunnerSaving}
+                className="min-h-12 rounded-xl bg-pink-500 px-3 text-sm font-black text-white disabled:opacity-60"
+              >
+                {isRunnerSaving ? "Saving…" : "Save Runner"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
 
       {paymentDraft ? (
         <div

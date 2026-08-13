@@ -15,6 +15,7 @@ const PAYMENTS_SHEET = "GatePayments";
 const WALK_INS_SHEET = "GateWalkIns";
 const EXPENSES_SHEET = "EventExpenses";
 const LOCKS_SHEET = "RunnerOperationLocks";
+const EVENT_SETTINGS_SHEET = "GateEventSettings";
 const RUNNER_LOCK_TTL_MS = 2 * 60 * 1_000;
 const READ_CACHE_TTL_MS = 5_000;
 const STALE_READ_CACHE_TTL_MS = 2 * 60_000;
@@ -35,6 +36,9 @@ let expenseReadCache:
   | undefined;
 let lockReadCache:
   | { loadedAt: number; value: RunnerOperationLock[] }
+  | undefined;
+let eventSettingsReadCache:
+  | { loadedAt: number; value: GateEventSettings[] }
   | undefined;
 
 type HeaderDefinition<Key extends string> = Readonly<{
@@ -102,6 +106,17 @@ type LockColumn =
   | "timestamp"
   | "expiresAt";
 
+type EventSettingsColumn =
+  | "id"
+  | "sheetName"
+  | "title"
+  | "eventDate"
+  | "eventTime"
+  | "location"
+  | "adminName"
+  | "adminPhone"
+  | "timestamp";
+
 const ACTIVITY_HEADERS: readonly HeaderDefinition<ActivityColumn>[] = [
   { key: "id", header: "Activity ID", aliases: ["ID"] },
   { key: "adminName", header: "Admin Name" },
@@ -168,6 +183,18 @@ const LOCK_HEADERS: readonly HeaderDefinition<LockColumn>[] = [
   { key: "expiresAt", header: "Expires At" },
 ];
 
+const EVENT_SETTINGS_HEADERS: readonly HeaderDefinition<EventSettingsColumn>[] = [
+  { key: "id", header: "Settings ID", aliases: ["ID"] },
+  { key: "sheetName", header: "Attendance Sheet", aliases: ["Sheet Name"] },
+  { key: "title", header: "Event Title", aliases: ["Title"] },
+  { key: "eventDate", header: "Event Date", aliases: ["Date"] },
+  { key: "eventTime", header: "Event Time", aliases: ["Time"] },
+  { key: "location", header: "Event Location", aliases: ["Location", "Meeting Point"] },
+  { key: "adminName", header: "Admin Name" },
+  { key: "adminPhone", header: "Admin Phone" },
+  { key: "timestamp", header: "Timestamp", aliases: ["Updated At"] },
+];
+
 export type AdminActivity = Readonly<{
   id: string;
   adminName: string;
@@ -226,6 +253,18 @@ export type RunnerOperationLock = Readonly<{
   adminPhone: string;
   timestamp: string;
   expiresAt: string;
+}>;
+
+export type GateEventSettings = Readonly<{
+  id: string;
+  sheetName: string;
+  title: string;
+  eventDate: string;
+  eventTime: string;
+  location: string;
+  adminName: string;
+  adminPhone: string;
+  timestamp: string;
 }>;
 
 function safeText(value: unknown, maxLength = 200): string {
@@ -471,6 +510,86 @@ async function appendUniqueRow<Key extends string>(
       );
     },
   );
+}
+
+export async function getGateEventSettings(
+  sheetName: string,
+): Promise<GateEventSettings | null> {
+  let settings: GateEventSettings[];
+
+  if (
+    eventSettingsReadCache &&
+    Date.now() - eventSettingsReadCache.loadedAt < READ_CACHE_TTL_MS
+  ) {
+    settings = eventSettingsReadCache.value;
+  } else {
+    const { columns, rows } = await readRows(
+      EVENT_SETTINGS_SHEET,
+      EVENT_SETTINGS_HEADERS,
+    );
+    settings = rows.flatMap((row) => {
+      const id = safeText(row[columns.id], 100);
+      const rowSheetName = safeText(row[columns.sheetName], 120);
+
+      return id && rowSheetName
+        ? [
+            {
+              id,
+              sheetName: rowSheetName,
+              title: safeText(row[columns.title], 120),
+              eventDate: safeText(row[columns.eventDate], 20),
+              eventTime: safeText(row[columns.eventTime], 20),
+              location: safeText(row[columns.location], 180),
+              adminName: safeText(row[columns.adminName], 100),
+              adminPhone: safeText(row[columns.adminPhone], 30),
+              timestamp: safeText(row[columns.timestamp], 40),
+            },
+          ]
+        : [];
+    });
+    eventSettingsReadCache = { loadedAt: Date.now(), value: settings };
+  }
+
+  const normalizedSheetName = normalizeSheetHeader(sheetName);
+
+  return (
+    [...settings]
+      .reverse()
+      .find(
+        (setting) =>
+          normalizeSheetHeader(setting.sheetName) === normalizedSheetName,
+      ) ?? null
+  );
+}
+
+export async function saveGateEventSettings(
+  input: Pick<
+    GateEventSettings,
+    "sheetName" | "title" | "eventDate" | "eventTime" | "location"
+  >,
+  admin: AdminIdentity,
+): Promise<GateEventSettings> {
+  const settings: GateEventSettings = {
+    id: randomUUID(),
+    sheetName: safeText(input.sheetName, 120),
+    title: safeText(input.title, 120),
+    eventDate: safeText(input.eventDate, 20),
+    eventTime: safeText(input.eventTime, 20),
+    location: safeText(input.location, 180),
+    adminName: admin.displayName,
+    adminPhone: admin.phoneE164,
+    timestamp: new Date().toISOString(),
+  };
+
+  await appendUniqueRow(
+    EVENT_SETTINGS_SHEET,
+    EVENT_SETTINGS_HEADERS,
+    "id",
+    settings.id,
+    settings,
+  );
+  eventSettingsReadCache = undefined;
+  return settings;
 }
 
 export async function recordAdminActivity(

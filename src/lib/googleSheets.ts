@@ -61,13 +61,22 @@ export type AttendanceRosterEntry = {
   phone: string;
   paymentType: string;
   status: string;
+  amountPaid: number;
+  balanceOwed: number;
 };
 
-type AttendanceColumn = "name" | "phone" | "paymentType" | "status";
+type AttendanceColumn =
+  | "name"
+  | "phone"
+  | "paymentType"
+  | "status"
+  | "amountPaid"
+  | "balanceOwed";
 
 type AttendanceColumns = Readonly<Record<AttendanceColumn, number>> & {
   readonly hasHeaderRow: boolean;
   readonly hasStatusHeader: boolean;
+  readonly missingHeaders: readonly AttendanceColumn[];
 };
 
 const ATTENDANCE_HEADER_ALIASES: Readonly<
@@ -105,6 +114,27 @@ const ATTENDANCE_HEADER_ALIASES: Readonly<
     "confirmed",
     "confirmed?",
   ],
+  amountPaid: [
+    "amount paid",
+    "amount paid egp",
+    "paid amount",
+    "amount received",
+  ],
+  balanceOwed: [
+    "balance owed",
+    "balance owed egp",
+    "remaining balance",
+    "amount owed",
+  ],
+};
+
+const ATTENDANCE_HEADER_LABELS: Readonly<Record<AttendanceColumn, string>> = {
+  name: "Full Name",
+  phone: "Phone / WhatsApp",
+  paymentType: "Payment Type",
+  status: "Status",
+  amountPaid: "Amount Paid EGP",
+  balanceOwed: "Balance Owed EGP",
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -615,6 +645,40 @@ export function normalizePhone(phone: string): string {
   return normalizeEgyptianMobilePhone(phone) ?? "";
 }
 
+function normalizeRosterContact(value: unknown): string {
+  const contact = String(value ?? "").trim().replace(/^'/, "").trim();
+  const egyptianPhone = normalizeEgyptianMobilePhone(contact);
+
+  if (egyptianPhone) {
+    return egyptianPhone;
+  }
+
+  if (!contact || contact === "-") {
+    return "";
+  }
+
+  if (contact.startsWith("@") || /[a-z._-]/i.test(contact)) {
+    return (contact.startsWith("@") ? contact : `@${contact}`).slice(0, 80);
+  }
+
+  const digits = contact.replace(/\D/g, "");
+  return digits.length >= 8
+    ? `${contact.startsWith("+") ? "+" : ""}${digits}`.slice(0, 30)
+    : contact.slice(0, 80);
+}
+
+function serializeRosterContact(value: string): string {
+  const contact = normalizeRosterContact(value);
+  const egyptianPhone = normalizeEgyptianMobilePhone(contact);
+
+  return egyptianPhone ? `'0${egyptianPhone}` : contact;
+}
+
+function safeAttendanceMoney(value: unknown): number {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? Math.max(0, amount) : 0;
+}
+
 function resolveAttendanceColumns(headerRow: readonly unknown[]): AttendanceColumns {
   const normalizedHeaders = headerRow.map(normalizeSheetHeader);
   const findColumn = (field: AttendanceColumn): number | undefined => {
@@ -628,16 +692,36 @@ function resolveAttendanceColumns(headerRow: readonly unknown[]): AttendanceColu
   const phone = findColumn("phone");
   const paymentType = findColumn("paymentType");
   const status = findColumn("status");
+  const amountPaid = findColumn("amountPaid");
+  const balanceOwed = findColumn("balanceOwed");
   const hasHeaderRow = name !== undefined && phone !== undefined;
-  const missingHeaderColumn = headerRow.length;
-
-  return {
+  const resolved: Partial<Record<AttendanceColumn, number>> = {
     name: name ?? 0,
     phone: phone ?? 1,
-    paymentType: paymentType ?? (hasHeaderRow ? missingHeaderColumn : 2),
-    status: status ?? (hasHeaderRow ? missingHeaderColumn : 3),
+  };
+  const missingHeaders: AttendanceColumn[] = [];
+  let nextColumn = Math.max(headerRow.length, 2);
+
+  for (const [field, existing] of [
+    ["paymentType", paymentType],
+    ["status", status],
+    ["amountPaid", amountPaid],
+    ["balanceOwed", balanceOwed],
+  ] as const) {
+    if (existing !== undefined) {
+      resolved[field] = existing;
+    } else {
+      resolved[field] = nextColumn;
+      nextColumn += 1;
+      missingHeaders.push(field);
+    }
+  }
+
+  return {
+    ...(resolved as Record<AttendanceColumn, number>),
     hasHeaderRow,
     hasStatusHeader: status !== undefined,
+    missingHeaders,
   };
 }
 
@@ -887,27 +971,201 @@ export async function getAttendanceRoster(
   for (let index = startIndex; index < rows.length; index += 1) {
     const row = rows[index];
     const name = String(row[columns.name] ?? "").trim().slice(0, 100);
-    const normalizedPhone = normalizeEgyptianMobilePhone(
-      String(row[columns.phone] ?? ""),
-    );
+    const contact = normalizeRosterContact(row[columns.phone]);
     const paymentType =
       String(row[columns.paymentType] ?? "").trim().slice(0, 40) || "Unknown";
     const status = String(row[columns.status] ?? "").trim().slice(0, 40);
 
-    if (!name || normalizedPhone === null) {
+    if (!name) {
       continue;
     }
 
     roster.push({
       rowIndex: index + 1,
       name,
-      phone: normalizedPhone,
+      phone: contact,
       paymentType,
       status,
+      amountPaid: safeAttendanceMoney(row[columns.amountPaid]),
+      balanceOwed: safeAttendanceMoney(row[columns.balanceOwed]),
     });
   }
 
   return roster;
+}
+
+export type AttendanceRunnerPatch = Readonly<{
+  name: string;
+  phone: string;
+  paymentType: string;
+  status: string;
+  amountPaid: number;
+  balanceOwed: number;
+}>;
+
+function runnerMatchesExpectedIdentity(
+  row: readonly unknown[],
+  columns: AttendanceColumns,
+  expectedName: string,
+  expectedPhone: string,
+): boolean {
+  return (
+    String(row[columns.name] ?? "").trim() === expectedName.trim() &&
+    normalizeRosterContact(row[columns.phone]) ===
+      normalizeRosterContact(expectedPhone)
+  );
+}
+
+export async function updateAttendanceRunner(
+  sheetName: string,
+  rowIndex: number,
+  expectedName: string,
+  expectedPhone: string,
+  patch: AttendanceRunnerPatch,
+): Promise<AttendanceRosterEntry> {
+  if (!Number.isSafeInteger(rowIndex) || rowIndex < 2) {
+    throw new Error("Attendance runner row must be a data row.");
+  }
+
+  const { rows, columns } = await getAttendanceValues(sheetName);
+
+  if (!columns.hasHeaderRow) {
+    throw new Error("Attendance runner editing requires a header row.");
+  }
+
+  const currentRow = rows[rowIndex - 1] ?? [];
+
+  if (
+    !runnerMatchesExpectedIdentity(
+      currentRow,
+      columns,
+      expectedName,
+      expectedPhone,
+    )
+  ) {
+    throw new Error(
+      "This runner moved or changed. Refresh the roster before editing.",
+    );
+  }
+
+  const sheets = await getSheetsClient();
+  const headerWrites = columns.missingHeaders.map((field) => ({
+    range: `${quoteSheetName(sheetName)}!${columnIndexToA1(columns[field])}1`,
+    values: [[ATTENDANCE_HEADER_LABELS[field]]],
+  }));
+  const values: Readonly<Record<AttendanceColumn, unknown>> = {
+    name: patch.name.trim(),
+    phone: serializeRosterContact(patch.phone),
+    paymentType: patch.paymentType.trim(),
+    status: patch.status.trim(),
+    amountPaid: safeAttendanceMoney(patch.amountPaid),
+    balanceOwed: safeAttendanceMoney(patch.balanceOwed),
+  };
+  const runnerWrites = (
+    Object.entries(values) as [AttendanceColumn, unknown][]
+  ).map(([field, value]) => ({
+    range: `${quoteSheetName(sheetName)}!${columnIndexToA1(
+      columns[field],
+    )}${rowIndex}`,
+    values: [[value]],
+  }));
+
+  await withGoogleSheetsRetry(
+    `update attendance runner row ${rowIndex} in ${sheetName}`,
+    () =>
+      sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: GOOGLE_SPREADSHEET_ID,
+        requestBody: {
+          valueInputOption: "USER_ENTERED",
+          data: [...headerWrites, ...runnerWrites],
+        },
+      }),
+  );
+
+  const updated = (await getAttendanceRoster(sheetName)).find(
+    (runner) => runner.rowIndex === rowIndex,
+  );
+
+  if (!updated) {
+    throw new Error("The updated runner could not be read back.");
+  }
+
+  return updated;
+}
+
+export async function deleteAttendanceRunner(
+  sheetName: string,
+  rowIndex: number,
+  expectedName: string,
+  expectedPhone: string,
+): Promise<void> {
+  if (!Number.isSafeInteger(rowIndex) || rowIndex < 2) {
+    throw new Error("Attendance runner row must be a data row.");
+  }
+
+  const { rows, columns } = await getAttendanceValues(sheetName);
+  const currentRow = rows[rowIndex - 1] ?? [];
+
+  if (
+    !runnerMatchesExpectedIdentity(
+      currentRow,
+      columns,
+      expectedName,
+      expectedPhone,
+    )
+  ) {
+    throw new Error(
+      "This runner moved or changed. Refresh the roster before deleting.",
+    );
+  }
+
+  const sheets = await getSheetsClient();
+  const metadata = await withGoogleSheetsRetry(
+    `find attendance sheet ${sheetName}`,
+    () =>
+      sheets.spreadsheets.get({
+        spreadsheetId: GOOGLE_SPREADSHEET_ID,
+        fields: "sheets.properties(sheetId,title)",
+      }),
+  );
+  const sheetId = metadata.data.sheets?.find(
+    (sheet) => sheet.properties?.title === sheetName,
+  )?.properties?.sheetId;
+
+  if (typeof sheetId !== "number") {
+    throw new Error("The active attendance sheet could not be resolved.");
+  }
+
+  await withGoogleSheetsIdempotentMutationRetry(
+    `delete attendance runner row ${rowIndex} in ${sheetName}`,
+    () =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId: GOOGLE_SPREADSHEET_ID,
+        requestBody: {
+          requests: [
+            {
+              deleteDimension: {
+                range: {
+                  sheetId,
+                  dimension: "ROWS",
+                  startIndex: rowIndex - 1,
+                  endIndex: rowIndex,
+                },
+              },
+            },
+          ],
+        },
+      }),
+    async () => {
+      const refreshed = await getAttendanceValues(sheetName);
+      return !runnerMatchesExpectedIdentity(
+        refreshed.rows[rowIndex - 1] ?? [],
+        refreshed.columns,
+        expectedName,
+        expectedPhone,
+      );
+    },
+  );
 }
 
 export async function markAsConfirmed(

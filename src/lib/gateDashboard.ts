@@ -5,8 +5,10 @@ import {
   type AttendanceRosterEntry,
 } from "@/lib/googleSheets";
 import {
+  getGateEventSettings,
   listGatePayments,
   listGateWalkIns,
+  type GateEventSettings,
 } from "@/lib/adminOperations";
 import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
 
@@ -29,6 +31,7 @@ export type GateDashboardData = Readonly<{
   changeOwed: number;
   owedRunnerRows: readonly number[];
   roster: AttendanceRosterEntry[];
+  eventSettings: GateEventSettings | null;
 }>;
 
 function isCashPayment(method: string): boolean {
@@ -52,6 +55,7 @@ export function emptyGateDashboard(
     changeOwed: 0,
     owedRunnerRows: [],
     roster: [],
+    eventSettings: null,
   };
 }
 
@@ -88,10 +92,20 @@ export function invalidateGateDashboardCache(): void {
 
 async function loadGateDashboardData(): Promise<GateDashboardData> {
   const { sheetName, isFallback } = await resolveActiveAttendanceSheetName();
-  const [roster, payments, walkIns] = await Promise.all([
+  const [roster, payments, walkIns, eventSettings] = await Promise.all([
     getAttendanceRoster(sheetName),
     listGatePayments(sheetName),
     listGateWalkIns(sheetName),
+    getGateEventSettings(sheetName).catch((error: unknown) => {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "Gate event settings are unavailable; using defaults.",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      return null;
+    }),
   ]);
   const confirmedRows = new Set(
     roster
@@ -160,6 +174,7 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
     changeOwed,
     owedRunnerRows,
     roster,
+    eventSettings,
   };
 }
 
