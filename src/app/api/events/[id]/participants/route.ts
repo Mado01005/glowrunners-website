@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAdminSessionFromRequest } from "@/lib/adminAuth";
 import { recordAdminActivity } from "@/lib/adminOperations";
+import { invalidateGateDashboardCache } from "@/lib/gateDashboard";
 import {
   forbiddenPostRunResponse,
   isApiObject,
@@ -148,6 +149,7 @@ export async function POST(
       input,
       session.admin.phoneE164,
     );
+    invalidateGateDashboardCache();
     await recordAdminActivity(
       session.admin,
       "POST_RUN_PARTICIPANT_ADDED",
@@ -229,6 +231,7 @@ export async function PATCH(
       patch,
       session.admin.phoneE164,
     );
+    invalidateGateDashboardCache();
     await recordAdminActivity(
       session.admin,
       "POST_RUN_PARTICIPANT_UPDATED",

@@ -10,7 +10,11 @@ import {
   type FormEvent,
 } from "react";
 import type { Html5Qrcode } from "html5-qrcode";
-import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
+import {
+  isConfirmedRunner,
+  isOwedRunner,
+  isPendingRunner,
+} from "@/lib/gateRunnerStatus";
 
 type RosterEntry = Readonly<{
   rowIndex: number;
@@ -20,6 +24,11 @@ type RosterEntry = Readonly<{
   status: string;
   amountPaid: number;
   balanceOwed: number;
+  paymentStatus: string;
+  checkedIn: boolean;
+  source: "attendance" | "walk-in" | "post-run";
+  eventId?: string;
+  participantId?: string;
 }>;
 
 type GateEventSettings = Readonly<{
@@ -153,6 +162,7 @@ const INITIAL_DASHBOARD: Dashboard = {
 const SCANNER_ID = "glowrunners-gate-scanner";
 const SESSION_STORAGE_KEY = "glowrunners.admin.identity.v1";
 const OFFLINE_QUEUE_KEY = "glowrunners.admin.offline-checkins.v1";
+const GATE_ROSTER_SYNC_CHANNEL = "glowrunners-gate-roster-v1";
 const ENTRY_FEE_EGP = 70;
 const WALK_IN_FEE_EGP = ENTRY_FEE_EGP;
 
@@ -194,13 +204,13 @@ function normalizePhone(value: string): string {
 }
 
 function isConfirmed(runner: RosterEntry): boolean {
-  return isConfirmedAttendanceStatus(runner.status);
+  return isConfirmedRunner(runner);
 }
 
 function runnerStatusDraft(status: string): RunnerStatusDraft {
   const normalized = status.trim().toLocaleUpperCase("en-US");
 
-  if (isConfirmedAttendanceStatus(status)) {
+  if (isConfirmedRunner({ status })) {
     return "CONFIRMED";
   }
 
@@ -264,6 +274,23 @@ function parseRoster(value: unknown): RosterEntry[] {
             : "",
         amountPaid: Math.max(0, Number(candidate.amountPaid) || 0),
         balanceOwed: Math.max(0, Number(candidate.balanceOwed) || 0),
+        paymentStatus:
+          typeof candidate.paymentStatus === "string"
+            ? candidate.paymentStatus.trim().slice(0, 40)
+            : typeof candidate.status === "string"
+              ? candidate.status.trim().slice(0, 40)
+              : "",
+        checkedIn: candidate.checkedIn === true,
+        source:
+          candidate.source === "walk-in" || candidate.source === "post-run"
+            ? candidate.source
+            : "attendance",
+        eventId:
+          typeof candidate.eventId === "string" ? candidate.eventId : undefined,
+        participantId:
+          typeof candidate.participantId === "string"
+            ? candidate.participantId
+            : undefined,
       },
     ];
   });
@@ -644,7 +671,10 @@ export function GateControlDashboard() {
     try {
       const response = await fetch(
         force ? "/api/admin/stats?force=1" : "/api/admin/stats",
-        { cache: "no-store" },
+        {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        },
       );
       const payload = await readJson(response);
 
@@ -893,6 +923,27 @@ export function GateControlDashboard() {
     refreshLocks,
     refreshPostRunSignups,
   ]);
+
+  useEffect(() => {
+    const refreshMergedRoster = () => void refreshDashboard(true);
+    window.addEventListener(
+      "glowrunners:gate-roster-changed",
+      refreshMergedRoster,
+    );
+    const channel =
+      "BroadcastChannel" in window
+        ? new BroadcastChannel(GATE_ROSTER_SYNC_CHANNEL)
+        : null;
+    channel?.addEventListener("message", refreshMergedRoster);
+
+    return () => {
+      window.removeEventListener(
+        "glowrunners:gate-roster-changed",
+        refreshMergedRoster,
+      );
+      channel?.close();
+    };
+  }, [refreshDashboard]);
 
   useEffect(() => {
     try {
@@ -1374,7 +1425,20 @@ export function GateControlDashboard() {
       ),
     [queuedPendingItems],
   );
-  const queuedNewCount = queuedPendingItems.length;
+  const effectiveRoster = useMemo(
+    () =>
+      dashboard.roster.map((runner) =>
+        queuedPhones.has(normalizePhone(runner.phone))
+          ? {
+              ...runner,
+              status: "CONFIRMED",
+              paymentStatus: "CONFIRMED",
+              checkedIn: true,
+            }
+          : runner,
+      ),
+    [dashboard.roster, queuedPhones],
+  );
   const queuedCash = queuedPendingItems.reduce(
     (sum, item) =>
       sum + (item.paymentMethod === "Cash" ? item.amountReceived : 0),
@@ -1393,68 +1457,41 @@ export function GateControlDashboard() {
     (sum, expense) => sum + Number(expense.amountEgp || 0),
     0,
   );
-  const displayedConfirmed = dashboard.confirmed + queuedNewCount;
-  const displayedTotal = dashboard.total;
-  const displayedPending = Math.max(
-    0,
-    dashboard.pending - queuedNewCount,
-  );
+  const displayedConfirmed = effectiveRoster.filter(isConfirmedRunner).length;
+  const displayedTotal = effectiveRoster.length;
+  const displayedPending = effectiveRoster.filter(isPendingRunner).length;
   const displayedCash = dashboard.cashInHand + queuedCash;
   const displayedDigital = dashboard.digitalRevenue + queuedDigital;
   const displayedChange = dashboard.changeOwed + queuedChange + walkInChange;
-  const owedRows = useMemo(
-    () => {
-      const rows = new Set(dashboard.owedRunnerRows);
-
-      for (const item of queuedPendingItems) {
-        if (item.changeOwed > 0) {
-          rows.add(item.runnerRow);
-        }
-      }
-
-      return rows;
-    },
-    [dashboard.owedRunnerRows, queuedPendingItems],
-  );
 
   const filteredRoster = useMemo(() => {
     const query = search.trim().toLocaleLowerCase("en-US");
     const phoneQuery = normalizePhone(search);
 
-    return dashboard.roster
+    return effectiveRoster
       .filter((runner) => {
-        const confirmed =
-          isConfirmed(runner) ||
-          queuedPhones.has(normalizePhone(runner.phone));
-
-        if (rosterFilter === "confirmed" && !confirmed) {
+        if (rosterFilter === "confirmed" && !isConfirmedRunner(runner)) {
           return false;
         }
 
-        if (rosterFilter === "pending" && confirmed) {
+        if (rosterFilter === "pending" && !isPendingRunner(runner)) {
           return false;
         }
 
-        if (
-          rosterFilter === "owed" &&
-          !owedRows.has(runner.rowIndex) &&
-          runner.balanceOwed <= 0 &&
-          runner.status.trim().toLocaleUpperCase("en-US") !== "OWED"
-        ) {
+        if (rosterFilter === "owed" && !isOwedRunner(runner)) {
           return false;
         }
 
         return (
           !query ||
           runner.name.toLocaleLowerCase("en-US").includes(query) ||
+          runner.phone.toLocaleLowerCase("en-US").includes(query) ||
           (phoneQuery.length > 0 && runner.phone.includes(phoneQuery))
         );
       })
       .slice(0, 150);
   }, [
-    dashboard.roster,
-    owedRows,
-    queuedPhones,
+    effectiveRoster,
     rosterFilter,
     search,
   ]);
@@ -1534,23 +1571,47 @@ export function GateControlDashboard() {
       }
 
       if (savedWalkIn.sheetName === dashboard.sheetName) {
-        setDashboard((current) => ({
-          ...current,
-          walkInCount: current.walkInCount + 1,
-          confirmed: current.confirmed + 1,
-          total: current.total + 1,
-          cashInHand:
-            current.cashInHand +
-            (savedWalkIn.paymentMethod === "Cash"
-              ? savedWalkIn.amountReceived
-              : 0),
-          digitalRevenue:
-            current.digitalRevenue +
-            (savedWalkIn.paymentMethod === "InstaPay"
-              ? savedWalkIn.amountReceived
-              : 0),
-          changeOwed: current.changeOwed + savedWalkIn.changeOwed,
-        }));
+        setDashboard((current) => {
+          const nextRowIndex = Math.min(
+            -1,
+            ...current.roster.map((runner) => runner.rowIndex - 1),
+          );
+          const roster = [
+            ...current.roster,
+            {
+              rowIndex: nextRowIndex,
+              name: savedWalkIn.name,
+              phone: savedWalkIn.phone,
+              paymentType: savedWalkIn.paymentMethod,
+              status: "CONFIRMED",
+              paymentStatus: "CONFIRMED",
+              checkedIn: true,
+              amountPaid: savedWalkIn.amountReceived,
+              balanceOwed: 0,
+              source: "walk-in" as const,
+            },
+          ];
+
+          return {
+            ...current,
+            roster,
+            walkInCount: current.walkInCount + 1,
+            confirmed: roster.filter(isConfirmedRunner).length,
+            pending: roster.filter(isPendingRunner).length,
+            total: roster.length,
+            cashInHand:
+              current.cashInHand +
+              (savedWalkIn.paymentMethod === "Cash"
+                ? savedWalkIn.amountReceived
+                : 0),
+            digitalRevenue:
+              current.digitalRevenue +
+              (savedWalkIn.paymentMethod === "InstaPay"
+                ? savedWalkIn.amountReceived
+                : 0),
+            changeOwed: current.changeOwed + savedWalkIn.changeOwed,
+          };
+        });
       }
 
       setWalkInName("");
@@ -1690,6 +1751,17 @@ export function GateControlDashboard() {
   };
 
   const openRunnerEditor = (runner: RosterEntry) => {
+    if (runner.source !== "attendance") {
+      setFeedback({
+        tone: "idle",
+        message:
+          runner.source === "post-run"
+            ? `${runner.name} is synced from Post-Run Events. Edit this runner from the Post-Run Events dashboard.`
+            : `${runner.name} is stored in the walk-in ledger.`,
+      });
+      return;
+    }
+
     setRunnerEditDraft({
       rowIndex: runner.rowIndex,
       expectedName: runner.name,
@@ -1708,14 +1780,14 @@ export function GateControlDashboard() {
       const roster = current.roster.map((candidate) =>
         candidate.rowIndex === runner.rowIndex ? runner : candidate,
       );
-      const confirmed = roster.filter(isConfirmed).length;
+      const confirmed = roster.filter(isConfirmedRunner).length;
 
       return {
         ...current,
         roster,
-        confirmed: confirmed + current.walkInCount,
-        pending: Math.max(0, roster.length - confirmed),
-        total: roster.length + current.walkInCount,
+        confirmed,
+        pending: roster.filter(isPendingRunner).length,
+        total: roster.length,
       };
     });
   };
@@ -1815,14 +1887,14 @@ export function GateControlDashboard() {
               ? { ...runner, rowIndex: runner.rowIndex - 1 }
               : runner,
           );
-        const confirmedCount = roster.filter(isConfirmed).length;
+        const confirmedCount = roster.filter(isConfirmedRunner).length;
 
         return {
           ...current,
           roster,
-          confirmed: confirmedCount + current.walkInCount,
-          pending: Math.max(0, roster.length - confirmedCount),
-          total: roster.length + current.walkInCount,
+          confirmed: confirmedCount,
+          pending: roster.filter(isPendingRunner).length,
+          total: roster.length,
         };
       });
       setOfflineQueue((current) =>
@@ -1860,7 +1932,7 @@ export function GateControlDashboard() {
       displayedCash - displayedChange - cashExpenses;
     const registeredConfirmed = Math.max(
       0,
-      dashboard.confirmed - dashboard.walkInCount + queuedNewCount,
+      displayedConfirmed - dashboard.walkInCount,
     );
     const report = [
       `📊 GlowRunners Meetup Report – ${eventSettings.title}`,
@@ -2159,9 +2231,8 @@ export function GateControlDashboard() {
               </div>
             ) : (
               filteredRoster.map((runner) => {
-                const confirmed =
-                  isConfirmed(runner) ||
-                  queuedPhones.has(normalizePhone(runner.phone));
+                const confirmed = isConfirmedRunner(runner);
+                const canProcess = runner.source === "attendance" && !confirmed;
                 const lock = lockByRow.get(runner.rowIndex);
                 const lockedByAnother =
                   lock && lock.adminPhone !== activeAdmin?.phoneE164;
@@ -2195,6 +2266,13 @@ export function GateControlDashboard() {
                           {money(runner.amountPaid)} paid · {money(runner.balanceOwed)} owed
                         </p>
                       ) : null}
+                      {runner.source !== "attendance" ? (
+                        <p className="mt-1 text-[9px] font-black uppercase tracking-[0.08em] text-fuchsia-300">
+                          {runner.source === "post-run"
+                            ? "Synced from Post-Run Events"
+                            : "Walk-in runner"}
+                        </p>
+                      ) : null}
                       {lockedByAnother ? (
                         <p className="mt-1 truncate text-[10px] font-bold text-amber-300">
                           ⚡ {lock.adminName} is processing…
@@ -2211,14 +2289,18 @@ export function GateControlDashboard() {
                         event.stopPropagation();
                         void beginPayment(runner);
                       }}
-                      disabled={confirmed || Boolean(lockedByAnother)}
+                      disabled={!canProcess || Boolean(lockedByAnother)}
                       className={`min-h-11 shrink-0 rounded-lg px-3 text-xs font-black ${
                         confirmed
                           ? "bg-emerald-500/15 text-emerald-300"
                           : "bg-gradient-to-r from-orange-500 to-pink-500 text-white"
                       } disabled:cursor-not-allowed`}
                     >
-                      {confirmed ? "Confirmed" : "Process"}
+                      {confirmed
+                        ? "Confirmed"
+                        : runner.source === "attendance"
+                          ? "Process"
+                          : "Synced"}
                     </button>
                   </div>
                 );

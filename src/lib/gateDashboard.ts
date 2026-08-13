@@ -10,7 +10,15 @@ import {
   listGateWalkIns,
   type GateEventSettings,
 } from "@/lib/adminOperations";
-import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
+import {
+  isConfirmedRunner,
+  isPendingRunner,
+} from "@/lib/gateRunnerStatus";
+import { parseAttendanceSheetDate } from "@/lib/attendanceSheetDate";
+import {
+  listEventParticipants,
+  listPostRunEvents,
+} from "@/lib/postRunEvents";
 
 const DASHBOARD_CACHE_TTL_MS = 8_000;
 const DASHBOARD_STALE_TTL_MS = 2 * 60_000;
@@ -18,6 +26,14 @@ let dashboardCache:
   | { loadedAt: number; value: GateDashboardData }
   | undefined;
 let dashboardRequest: Promise<GateDashboardData> | undefined;
+
+export type GateRosterEntry = AttendanceRosterEntry & Readonly<{
+  source: "attendance" | "walk-in" | "post-run";
+  paymentStatus: string;
+  checkedIn: boolean;
+  eventId?: string;
+  participantId?: string;
+}>;
 
 export type GateDashboardData = Readonly<{
   sheetName: string;
@@ -30,7 +46,7 @@ export type GateDashboardData = Readonly<{
   digitalRevenue: number;
   changeOwed: number;
   owedRunnerRows: readonly number[];
-  roster: AttendanceRosterEntry[];
+  roster: GateRosterEntry[];
   eventSettings: GateEventSettings | null;
 }>;
 
@@ -92,7 +108,7 @@ export function invalidateGateDashboardCache(): void {
 
 async function loadGateDashboardData(): Promise<GateDashboardData> {
   const { sheetName, isFallback } = await resolveActiveAttendanceSheetName();
-  const [roster, payments, walkIns, eventSettings] = await Promise.all([
+  const [attendanceRoster, payments, walkIns, eventSettings, postRunEvents] = await Promise.all([
     getAttendanceRoster(sheetName),
     listGatePayments(sheetName),
     listGateWalkIns(sheetName),
@@ -106,10 +122,135 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
       );
       return null;
     }),
+    listPostRunEvents().catch((error: unknown) => {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "Post-run participants are unavailable to Gate Control.",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      return [];
+    }),
   ]);
+  const attendanceDate = parseAttendanceSheetDate(sheetName, new Date());
+  const activeDate =
+    eventSettings?.eventDate || attendanceDate?.toISOString().slice(0, 10) || "";
+  const activePostRunEvents = postRunEvents.filter(
+    (event) => event.associatedDate === activeDate,
+  );
+  const postRunParticipantGroups = await Promise.all(
+    activePostRunEvents.map(async (event) => ({
+      event,
+      participants: await listEventParticipants(event.id).catch(
+        (error: unknown) => {
+          console.warn(
+            JSON.stringify({
+              level: "warn",
+              message: `Unable to merge participants for ${event.title}.`,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+          return [];
+        },
+      ),
+    })),
+  );
+  const normalizedContact = (value: string) => {
+    const clean = value.trim().replace(/^'/, "").trim();
+
+    if (clean.startsWith("@") || /[a-z._-]/i.test(clean)) {
+      return clean.toLocaleLowerCase("en-US");
+    }
+
+    return clean.replace(/\D/g, "").replace(/^20/, "").replace(/^0+/, "");
+  };
+  const identityKey = (name: string, contact: string) => {
+    const normalized = normalizedContact(contact);
+    return normalized
+      ? `contact:${normalized}`
+      : `name:${name.trim().toLocaleLowerCase("en-US")}`;
+  };
+  const mergedByIdentity = new Map<string, GateRosterEntry>();
+
+  for (const runner of attendanceRoster) {
+    mergedByIdentity.set(identityKey(runner.name, runner.phone), {
+      ...runner,
+      source: "attendance",
+      paymentStatus: runner.status,
+      checkedIn: isConfirmedRunner(runner),
+    });
+  }
+
+  for (const [index, walkIn] of walkIns.entries()) {
+    const runner: GateRosterEntry = {
+      rowIndex: -1 - index,
+      name: walkIn.name,
+      phone: walkIn.phone,
+      paymentType: walkIn.paymentMethod,
+      status: "CONFIRMED",
+      paymentStatus: "CONFIRMED",
+      checkedIn: true,
+      amountPaid: walkIn.amountPaidEgp,
+      balanceOwed: 0,
+      source: "walk-in",
+    };
+    const key = identityKey(runner.name, runner.phone);
+    const existing = mergedByIdentity.get(key);
+
+    mergedByIdentity.set(
+      key,
+      existing
+        ? {
+            ...existing,
+            status: "CONFIRMED",
+            paymentStatus: "CONFIRMED",
+            checkedIn: true,
+            amountPaid: Math.max(existing.amountPaid, runner.amountPaid),
+            balanceOwed: 0,
+          }
+        : runner,
+    );
+  }
+
+  let postRunIndex = -100_000;
+  for (const { event, participants } of postRunParticipantGroups) {
+    for (const participant of participants) {
+      const paymentStatus =
+        participant.settlementStatus === "Free"
+          ? "FREE"
+          : participant.settlementStatus === "Fully Cleared"
+            ? "CLEARED"
+            : participant.depositAmountPaidEgp > 0
+              ? "DEPOSIT_PAID"
+              : "UNPAID";
+      const runner: GateRosterEntry = {
+        rowIndex: postRunIndex,
+        name: participant.name,
+        phone: participant.whatsappPhone,
+        paymentType: `Post-Run · ${event.title}`,
+        status: paymentStatus,
+        paymentStatus,
+        checkedIn: false,
+        amountPaid: participant.depositAmountPaidEgp,
+        balanceOwed: participant.remainingBalanceEgp,
+        source: "post-run",
+        eventId: event.id,
+        participantId: participant.id,
+      };
+      postRunIndex -= 1;
+      const key = identityKey(runner.name, runner.phone);
+
+      if (!mergedByIdentity.has(key)) {
+        mergedByIdentity.set(key, runner);
+      }
+    }
+  }
+
+  const roster = [...mergedByIdentity.values()];
   const confirmedRows = new Set(
     roster
-      .filter((runner) => isConfirmedAttendanceStatus(runner.status))
+      .filter(isConfirmedRunner)
       .map((runner) => runner.rowIndex),
   );
   const seenPaymentRows = new Set<number>();
@@ -166,9 +307,9 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
     sheetName,
     isFallbackSheet: isFallback,
     walkInCount: walkIns.length,
-    confirmed: confirmedRows.size + walkIns.length,
-    pending: Math.max(0, roster.length - confirmedRows.size),
-    total: roster.length + walkIns.length,
+    confirmed: roster.filter(isConfirmedRunner).length,
+    pending: roster.filter(isPendingRunner).length,
+    total: roster.length,
     cashInHand,
     digitalRevenue,
     changeOwed,

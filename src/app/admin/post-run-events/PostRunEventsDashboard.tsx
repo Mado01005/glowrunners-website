@@ -120,6 +120,7 @@ const EMPTY_PARTICIPANT_FORM: ParticipantFormState = {
 const SESSION_STORAGE_KEY = "glowrunners.admin.identity.v1";
 const POST_RUN_EVENTS_API = "/api/post-run-events";
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const GATE_ROSTER_SYNC_CHANNEL = "glowrunners-gate-roster-v1";
 
 const MONEY_FORMATTER = new Intl.NumberFormat("en-EG", {
   maximumFractionDigits: 2,
@@ -153,6 +154,16 @@ function formatCompactMoney(value: number) {
 function safeNonNegativeNumber(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function notifyGateRosterChanged() {
+  window.dispatchEvent(new Event("glowrunners:gate-roster-changed"));
+
+  if ("BroadcastChannel" in window) {
+    const channel = new BroadcastChannel(GATE_ROSTER_SYNC_CHANNEL);
+    channel.postMessage({ type: "participants-changed" });
+    channel.close();
+  }
 }
 
 function normalizeContactForComparison(value: string) {
@@ -814,12 +825,17 @@ export function PostRunEventsDashboard() {
     }
   }, []);
 
-  const loadParticipants = useCallback(async (eventId: string) => {
+  const loadParticipants = useCallback(async (
+    eventId: string,
+    preserveExisting = false,
+  ) => {
     const requestId = participantsRequestIdRef.current + 1;
     participantsRequestIdRef.current = requestId;
     setEventsServiceError(null);
     setEventsConnectionMessage(null);
-    setParticipants([]);
+    if (!preserveExisting) {
+      setParticipants([]);
+    }
 
     if (!eventId) {
       setIsLoadingParticipants(false);
@@ -831,6 +847,7 @@ export function PostRunEventsDashboard() {
     try {
       const { response, payload } = await apiRequest(
         `/api/events/${encodeURIComponent(eventId)}/participants`,
+        { headers: { "Cache-Control": "no-cache" } },
       );
 
       if (
@@ -1331,6 +1348,8 @@ export function PostRunEventsDashboard() {
         tone: "success",
         message: `${created.fullName} was added.`,
       });
+      notifyGateRosterChanged();
+      void loadParticipants(selectedEvent.id, true);
     } catch (error) {
       setNotice({
         tone: "error",
@@ -1459,6 +1478,7 @@ export function PostRunEventsDashboard() {
               ? `${updated.fullName} is fully cleared.`
               : `${updated.fullName}'s ledger was updated.`,
         });
+        notifyGateRosterChanged();
         return updated;
       } catch (error) {
         setParticipants((current) =>
@@ -1597,6 +1617,7 @@ export function PostRunEventsDashboard() {
         tone: "success",
         message: `${participant.fullName} was deleted from the event.`,
       });
+      notifyGateRosterChanged();
     } catch (error) {
       setNotice({
         tone: "error",
