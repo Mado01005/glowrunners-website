@@ -44,13 +44,8 @@ export function evaluateRunnerState(
     isFree ||
     runner.checkedIn === true ||
     (owed === 0 && paid > 0);
-  const isOwed = owed > 0 && !isFree;
-  const isPending =
-    status === "DEPOSIT PAID" ||
-    status === "DEPOSIT_PAID" ||
-    status === "PENDING" ||
-    status === "UNPAID" ||
-    isOwed;
+  const isOwed = owed > 0;
+  const isPending = !isConfirmed;
 
   return { isConfirmed, isPending, isOwed, isFree, paid, owed };
 }

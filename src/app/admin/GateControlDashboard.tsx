@@ -203,6 +203,17 @@ function isConfirmed(runner: RosterEntry): boolean {
   return evaluateRunnerState(runner).isConfirmed;
 }
 
+function summarizeRosterCounters(roster: readonly RosterEntry[]) {
+  const total = roster.length;
+  const confirmed = roster.filter(isConfirmed).length;
+
+  return {
+    total,
+    confirmed,
+    pending: Math.max(0, total - confirmed),
+  };
+}
+
 function runnerStatusDraft(status: string): RunnerStatusDraft {
   const normalized = status.trim().toLocaleUpperCase("en-US");
 
@@ -1462,8 +1473,6 @@ export function GateControlDashboard() {
         (summary, runner) => {
           const state = evaluateRunnerState(runner);
           return {
-            confirmed: summary.confirmed + Number(state.isConfirmed),
-            pending: summary.pending + Number(state.isPending),
             owed: summary.owed + Number(state.isOwed),
             free: summary.free + Number(state.isFree),
             paid: summary.paid + (state.isFree ? 0 : state.paid),
@@ -1472,8 +1481,6 @@ export function GateControlDashboard() {
           };
         },
         {
-          confirmed: 0,
-          pending: 0,
           owed: 0,
           free: 0,
           paid: 0,
@@ -1482,9 +1489,13 @@ export function GateControlDashboard() {
       ),
     [effectiveRoster],
   );
-  const displayedConfirmed = runnerStateSummary.confirmed;
-  const displayedTotal = effectiveRoster.length;
-  const displayedPending = runnerStateSummary.pending;
+  const rosterCounters = useMemo(
+    () => summarizeRosterCounters(effectiveRoster),
+    [effectiveRoster],
+  );
+  const displayedConfirmed = rosterCounters.confirmed;
+  const displayedTotal = rosterCounters.total;
+  const displayedPending = rosterCounters.pending;
   const displayedCash = dashboard.cashInHand + queuedCash;
   const displayedDigital = dashboard.digitalRevenue + queuedDigital;
   const displayedChange = dashboard.changeOwed + queuedChange + walkInChange;
@@ -1498,7 +1509,7 @@ export function GateControlDashboard() {
           return false;
         }
 
-        if (rosterFilter === "pending" && !state.isPending) {
+        if (rosterFilter === "pending" && state.isConfirmed) {
           return false;
         }
 
@@ -1621,18 +1632,15 @@ export function GateControlDashboard() {
               source: "walk-in" as const,
             },
           ];
+          const counters = summarizeRosterCounters(roster);
 
           return {
             ...current,
             roster,
             walkInCount: current.walkInCount + 1,
-            confirmed: roster.filter(
-              (runner) => evaluateRunnerState(runner).isConfirmed,
-            ).length,
-            pending: roster.filter(
-              (runner) => evaluateRunnerState(runner).isPending,
-            ).length,
-            total: roster.length,
+            confirmed: counters.confirmed,
+            pending: counters.pending,
+            total: counters.total,
             cashInHand:
               current.cashInHand +
               (savedWalkIn.paymentMethod === "Cash"
@@ -1814,18 +1822,14 @@ export function GateControlDashboard() {
       const roster = current.roster.map((candidate) =>
         candidate.rowIndex === runner.rowIndex ? runner : candidate,
       );
-      const confirmed = roster.filter(
-        (candidate) => evaluateRunnerState(candidate).isConfirmed,
-      ).length;
+      const counters = summarizeRosterCounters(roster);
 
       return {
         ...current,
         roster,
-        confirmed,
-        pending: roster.filter(
-          (candidate) => evaluateRunnerState(candidate).isPending,
-        ).length,
-        total: roster.length,
+        confirmed: counters.confirmed,
+        pending: counters.pending,
+        total: counters.total,
       };
     });
   };
@@ -1955,18 +1959,14 @@ export function GateControlDashboard() {
               ? { ...runner, rowIndex: runner.rowIndex - 1 }
               : runner,
           );
-        const confirmedCount = roster.filter(
-          (candidate) => evaluateRunnerState(candidate).isConfirmed,
-        ).length;
+        const counters = summarizeRosterCounters(roster);
 
         return {
           ...current,
           roster,
-          confirmed: confirmedCount,
-          pending: roster.filter(
-            (candidate) => evaluateRunnerState(candidate).isPending,
-          ).length,
-          total: roster.length,
+          confirmed: counters.confirmed,
+          pending: counters.pending,
+          total: counters.total,
         };
       });
       setOfflineQueue((current) =>
@@ -2267,8 +2267,8 @@ export function GateControlDashboard() {
           <div className="mt-3 grid min-w-0 grid-cols-4 gap-1.5">
             {[
               ["total", "👥 Total", displayedTotal],
-              ["confirmed", "🟢 Confirmed", runnerStateSummary.confirmed],
-              ["pending", "🟡 Pending", runnerStateSummary.pending],
+              ["confirmed", "🟢 Confirmed", displayedConfirmed],
+              ["pending", "🟡 Pending", displayedPending],
               ["owed", "🔴 Owed", runnerStateSummary.owed],
             ].map(([value, label, count]) => (
               <button

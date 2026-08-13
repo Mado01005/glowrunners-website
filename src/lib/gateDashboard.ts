@@ -255,10 +255,9 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
       const state = evaluateRunnerState(runner);
       return {
         confirmed: summary.confirmed + Number(state.isConfirmed),
-        pending: summary.pending + Number(state.isPending),
       };
     },
-    { confirmed: 0, pending: 0 },
+    { confirmed: 0 },
   );
   const seenPaymentRows = new Set<number>();
   const confirmedPayments = payments.filter((payment) => {
@@ -315,7 +314,7 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
     isFallbackSheet: isFallback,
     walkInCount: walkIns.length,
     confirmed: rosterStateSummary.confirmed,
-    pending: rosterStateSummary.pending,
+    pending: Math.max(0, roster.length - rosterStateSummary.confirmed),
     total: roster.length,
     cashInHand,
     digitalRevenue,
