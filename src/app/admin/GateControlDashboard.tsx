@@ -10,11 +10,7 @@ import {
   type FormEvent,
 } from "react";
 import type { Html5Qrcode } from "html5-qrcode";
-import {
-  isConfirmedRunner,
-  isOwedRunner,
-  isPendingRunner,
-} from "@/lib/gateRunnerStatus";
+import { evaluateRunnerState } from "@/lib/gateRunnerStatus";
 
 type RosterEntry = Readonly<{
   rowIndex: number;
@@ -204,13 +200,13 @@ function normalizePhone(value: string): string {
 }
 
 function isConfirmed(runner: RosterEntry): boolean {
-  return isConfirmedRunner(runner);
+  return evaluateRunnerState(runner).isConfirmed;
 }
 
 function runnerStatusDraft(status: string): RunnerStatusDraft {
   const normalized = status.trim().toLocaleUpperCase("en-US");
 
-  if (isConfirmedRunner({ status })) {
+  if (evaluateRunnerState({ status }).isConfirmed) {
     return "CONFIRMED";
   }
 
@@ -799,7 +795,10 @@ export function GateControlDashboard() {
         eventIds.map(async (eventId) => {
           const participantResponse = await fetch(
             `/api/events/${encodeURIComponent(eventId)}/participants`,
-            { cache: "no-store" },
+            {
+              cache: "no-store",
+              headers: { "Cache-Control": "no-cache" },
+            },
           );
           const participantPayload = await readJson(participantResponse);
           return participantResponse.ok &&
@@ -1457,44 +1456,75 @@ export function GateControlDashboard() {
     (sum, expense) => sum + Number(expense.amountEgp || 0),
     0,
   );
-  const displayedConfirmed = effectiveRoster.filter(isConfirmedRunner).length;
+  const runnerStateSummary = useMemo(
+    () =>
+      effectiveRoster.reduce(
+        (summary, runner) => {
+          const state = evaluateRunnerState(runner);
+          return {
+            confirmed: summary.confirmed + Number(state.isConfirmed),
+            pending: summary.pending + Number(state.isPending),
+            owed: summary.owed + Number(state.isOwed),
+            free: summary.free + Number(state.isFree),
+            paid: summary.paid + (state.isFree ? 0 : state.paid),
+            balanceOwed:
+              summary.balanceOwed + (state.isOwed ? state.owed : 0),
+          };
+        },
+        {
+          confirmed: 0,
+          pending: 0,
+          owed: 0,
+          free: 0,
+          paid: 0,
+          balanceOwed: 0,
+        },
+      ),
+    [effectiveRoster],
+  );
+  const displayedConfirmed = runnerStateSummary.confirmed;
   const displayedTotal = effectiveRoster.length;
-  const displayedPending = effectiveRoster.filter(isPendingRunner).length;
+  const displayedPending = runnerStateSummary.pending;
   const displayedCash = dashboard.cashInHand + queuedCash;
   const displayedDigital = dashboard.digitalRevenue + queuedDigital;
   const displayedChange = dashboard.changeOwed + queuedChange + walkInChange;
+
+  const tabFilteredRoster = useMemo(
+    () =>
+      effectiveRoster.filter((runner) => {
+        const state = evaluateRunnerState(runner);
+
+        if (rosterFilter === "confirmed" && !state.isConfirmed) {
+          return false;
+        }
+
+        if (rosterFilter === "pending" && !state.isPending) {
+          return false;
+        }
+
+        if (rosterFilter === "owed" && !state.isOwed) {
+          return false;
+        }
+
+        return true;
+      }),
+    [effectiveRoster, rosterFilter],
+  );
 
   const filteredRoster = useMemo(() => {
     const query = search.trim().toLocaleLowerCase("en-US");
     const phoneQuery = normalizePhone(search);
 
-    return effectiveRoster
-      .filter((runner) => {
-        if (rosterFilter === "confirmed" && !isConfirmedRunner(runner)) {
-          return false;
-        }
-
-        if (rosterFilter === "pending" && !isPendingRunner(runner)) {
-          return false;
-        }
-
-        if (rosterFilter === "owed" && !isOwedRunner(runner)) {
-          return false;
-        }
-
-        return (
+    return tabFilteredRoster
+      .filter(
+        (runner) =>
           !query ||
           runner.name.toLocaleLowerCase("en-US").includes(query) ||
           runner.phone.toLocaleLowerCase("en-US").includes(query) ||
-          (phoneQuery.length > 0 && runner.phone.includes(phoneQuery))
-        );
-      })
+          (phoneQuery.length > 0 && runner.phone.includes(phoneQuery)),
+      )
       .slice(0, 150);
-  }, [
-    effectiveRoster,
-    rosterFilter,
-    search,
-  ]);
+  }, [search, tabFilteredRoster]);
 
   const lockByRow = useMemo(() => {
     const map = new Map<number, RunnerLock>();
@@ -1596,8 +1626,12 @@ export function GateControlDashboard() {
             ...current,
             roster,
             walkInCount: current.walkInCount + 1,
-            confirmed: roster.filter(isConfirmedRunner).length,
-            pending: roster.filter(isPendingRunner).length,
+            confirmed: roster.filter(
+              (runner) => evaluateRunnerState(runner).isConfirmed,
+            ).length,
+            pending: roster.filter(
+              (runner) => evaluateRunnerState(runner).isPending,
+            ).length,
             total: roster.length,
             cashInHand:
               current.cashInHand +
@@ -1780,13 +1814,17 @@ export function GateControlDashboard() {
       const roster = current.roster.map((candidate) =>
         candidate.rowIndex === runner.rowIndex ? runner : candidate,
       );
-      const confirmed = roster.filter(isConfirmedRunner).length;
+      const confirmed = roster.filter(
+        (candidate) => evaluateRunnerState(candidate).isConfirmed,
+      ).length;
 
       return {
         ...current,
         roster,
         confirmed,
-        pending: roster.filter(isPendingRunner).length,
+        pending: roster.filter(
+          (candidate) => evaluateRunnerState(candidate).isPending,
+        ).length,
         total: roster.length,
       };
     });
@@ -1800,6 +1838,35 @@ export function GateControlDashboard() {
     }
 
     setIsRunnerSaving(true);
+    const previous = dashboard.roster.find(
+      (runner) => runner.rowIndex === runnerEditDraft.rowIndex,
+    );
+
+    if (!previous) {
+      setIsRunnerSaving(false);
+      setFeedback({
+        tone: "error",
+        message: "This runner is no longer in the active roster. Refresh and retry.",
+      });
+      return;
+    }
+
+    const isFree = runnerEditDraft.status === "FREE";
+    const optimistic: RosterEntry = {
+      ...previous,
+      name: runnerEditDraft.name.trim(),
+      phone: runnerEditDraft.phone.trim(),
+      paymentType: runnerEditDraft.paymentType.trim(),
+      status: runnerEditDraft.status,
+      paymentStatus: runnerEditDraft.status,
+      checkedIn: evaluateRunnerState({ status: runnerEditDraft.status })
+        .isConfirmed,
+      amountPaid: isFree ? 0 : Math.max(0, Number(runnerEditDraft.amountPaid) || 0),
+      balanceOwed: isFree
+        ? 0
+        : Math.max(0, Number(runnerEditDraft.balanceOwed) || 0),
+    };
+    replaceRunnerInDashboard(optimistic);
 
     try {
       const response = await fetch("/api/admin/roster", {
@@ -1833,6 +1900,7 @@ export function GateControlDashboard() {
         message: `${updated.name} was updated.`,
       });
     } catch (error) {
+      replaceRunnerInDashboard(previous);
       setFeedback({
         tone: "error",
         message:
@@ -1887,13 +1955,17 @@ export function GateControlDashboard() {
               ? { ...runner, rowIndex: runner.rowIndex - 1 }
               : runner,
           );
-        const confirmedCount = roster.filter(isConfirmedRunner).length;
+        const confirmedCount = roster.filter(
+          (candidate) => evaluateRunnerState(candidate).isConfirmed,
+        ).length;
 
         return {
           ...current,
           roster,
           confirmed: confirmedCount,
-          pending: roster.filter(isPendingRunner).length,
+          pending: roster.filter(
+            (candidate) => evaluateRunnerState(candidate).isPending,
+          ).length,
           total: roster.length,
         };
       });
@@ -2194,13 +2266,13 @@ export function GateControlDashboard() {
 
           <div className="mt-3 grid min-w-0 grid-cols-4 gap-1.5">
             {[
-              ["total", "👥 Total"],
-              ["confirmed", "🟢 Confirmed"],
-              ["pending", "🟡 Pending"],
-              ["owed", "🔴 Owed"],
-            ].map(([value, label]) => (
+              ["total", "👥 Total", displayedTotal],
+              ["confirmed", "🟢 Confirmed", runnerStateSummary.confirmed],
+              ["pending", "🟡 Pending", runnerStateSummary.pending],
+              ["owed", "🔴 Owed", runnerStateSummary.owed],
+            ].map(([value, label, count]) => (
               <button
-                key={value}
+                key={String(value)}
                 type="button"
                 onClick={() => setRosterFilter(value as RosterFilter)}
                 className={`min-h-11 min-w-0 rounded-lg px-1 text-[9px] font-black ${
@@ -2209,8 +2281,39 @@ export function GateControlDashboard() {
                     : "border border-white/10 bg-black/30 text-zinc-400"
                 }`}
               >
-                {label}
+                {label} · {count}
               </button>
+            ))}
+          </div>
+
+          <div
+            aria-label="Roster financial state"
+            className="mt-2 grid min-w-0 grid-cols-3 overflow-hidden rounded-xl border border-white/10 bg-black/30"
+          >
+            {[
+              ["🎁", "FREE", runnerStateSummary.free, "text-fuchsia-300"],
+              ["💰", "PAID", money(runnerStateSummary.paid), "text-emerald-300"],
+              [
+                "🔴",
+                "BALANCE OWED",
+                money(runnerStateSummary.balanceOwed),
+                "text-rose-300",
+              ],
+            ].map(([icon, label, value, color], index) => (
+              <div
+                key={String(label)}
+                className={`min-w-0 px-2 py-2 text-center ${
+                  index > 0 ? "border-l border-white/10" : ""
+                }`}
+              >
+                <p className="text-xs" aria-hidden="true">{icon}</p>
+                <p className={`truncate text-[11px] font-black ${color}`}>
+                  {value}
+                </p>
+                <p className="mt-0.5 truncate text-[7px] font-black tracking-[0.06em] text-zinc-500">
+                  {label}
+                </p>
+              </div>
             ))}
           </div>
 
@@ -2231,7 +2334,7 @@ export function GateControlDashboard() {
               </div>
             ) : (
               filteredRoster.map((runner) => {
-                const confirmed = isConfirmedRunner(runner);
+                const confirmed = evaluateRunnerState(runner).isConfirmed;
                 const canProcess = runner.source === "attendance" && !confirmed;
                 const lock = lockByRow.get(runner.rowIndex);
                 const lockedByAnother =

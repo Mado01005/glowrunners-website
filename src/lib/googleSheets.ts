@@ -1098,7 +1098,7 @@ export async function deleteAttendanceRunner(
   rowIndex: number,
   expectedName: string,
   expectedPhone: string,
-): Promise<void> {
+): Promise<AttendanceRosterEntry> {
   if (!Number.isSafeInteger(rowIndex) || rowIndex < 2) {
     throw new Error("Attendance runner row must be a data row.");
   }
@@ -1118,6 +1118,18 @@ export async function deleteAttendanceRunner(
       "This runner moved or changed. Refresh the roster before deleting.",
     );
   }
+
+  const deletedRunner: AttendanceRosterEntry = {
+    rowIndex,
+    name: String(currentRow[columns.name] ?? "").trim().slice(0, 100),
+    phone: normalizeRosterContact(currentRow[columns.phone]),
+    paymentType:
+      String(currentRow[columns.paymentType] ?? "").trim().slice(0, 40) ||
+      "Unknown",
+    status: String(currentRow[columns.status] ?? "").trim().slice(0, 40),
+    amountPaid: safeAttendanceMoney(currentRow[columns.amountPaid]),
+    balanceOwed: safeAttendanceMoney(currentRow[columns.balanceOwed]),
+  };
 
   const sheets = await getSheetsClient();
   const metadata = await withGoogleSheetsRetry(
@@ -1166,6 +1178,8 @@ export async function deleteAttendanceRunner(
       );
     },
   );
+
+  return deletedRunner;
 }
 
 export async function markAsConfirmed(

@@ -173,7 +173,7 @@ export async function DELETE(request: Request) {
 
   try {
     const { sheetName } = await resolveActiveAttendanceSheetName();
-    await deleteAttendanceRunner(
+    const participant = await deleteAttendanceRunner(
       sheetName,
       rowIndex,
       expectedName,
@@ -193,7 +193,12 @@ export async function DELETE(request: Request) {
     }
 
     return NextResponse.json(
-      { success: true, deletedRowIndex: rowIndex },
+      {
+        success: true,
+        participant,
+        runner: participant,
+        deletedRowIndex: rowIndex,
+      },
       { headers: NO_STORE_HEADERS },
     );
   } catch (error) {

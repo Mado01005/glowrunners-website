@@ -10,10 +10,7 @@ import {
   listGateWalkIns,
   type GateEventSettings,
 } from "@/lib/adminOperations";
-import {
-  isConfirmedRunner,
-  isPendingRunner,
-} from "@/lib/gateRunnerStatus";
+import { evaluateRunnerState } from "@/lib/gateRunnerStatus";
 import { parseAttendanceSheetDate } from "@/lib/attendanceSheetDate";
 import {
   listEventParticipants,
@@ -178,7 +175,7 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
       ...runner,
       source: "attendance",
       paymentStatus: runner.status,
-      checkedIn: isConfirmedRunner(runner),
+      checkedIn: evaluateRunnerState(runner).isConfirmed,
     });
   }
 
@@ -250,8 +247,18 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
   const roster = [...mergedByIdentity.values()];
   const confirmedRows = new Set(
     roster
-      .filter(isConfirmedRunner)
+      .filter((runner) => evaluateRunnerState(runner).isConfirmed)
       .map((runner) => runner.rowIndex),
+  );
+  const rosterStateSummary = roster.reduce(
+    (summary, runner) => {
+      const state = evaluateRunnerState(runner);
+      return {
+        confirmed: summary.confirmed + Number(state.isConfirmed),
+        pending: summary.pending + Number(state.isPending),
+      };
+    },
+    { confirmed: 0, pending: 0 },
   );
   const seenPaymentRows = new Set<number>();
   const confirmedPayments = payments.filter((payment) => {
@@ -307,8 +314,8 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
     sheetName,
     isFallbackSheet: isFallback,
     walkInCount: walkIns.length,
-    confirmed: roster.filter(isConfirmedRunner).length,
-    pending: roster.filter(isPendingRunner).length,
+    confirmed: rosterStateSummary.confirmed,
+    pending: rosterStateSummary.pending,
     total: roster.length,
     cashInHand,
     digitalRevenue,

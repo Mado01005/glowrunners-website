@@ -316,10 +316,13 @@ async function apiRequest(
   input: string,
   init?: RequestInit,
 ): Promise<{ response: Response; payload: unknown }> {
+  const headers = new Headers(init?.headers);
+  headers.set("Cache-Control", "no-cache");
   const response = await fetch(input, {
-    cache: "no-store",
     credentials: "same-origin",
     ...init,
+    cache: "no-store",
+    headers,
   });
   const payload = await readJson(response);
 
@@ -946,17 +949,18 @@ export function PostRunEventsDashboard() {
 
     const normalizedSearch = search.trim().toLocaleLowerCase("en-US");
 
-    return participants.filter((participant) => {
+    const filteredByPayment = participants.filter((participant) => {
       const state = paymentState(participant, selectedEvent);
-      const matchesFilter =
-        paymentFilter === "all" || state.kind === paymentFilter;
-      const matchesSearch =
+      return paymentFilter === "all" || state.kind === paymentFilter;
+    });
+
+    return filteredByPayment.filter(
+      (participant) =>
         !normalizedSearch ||
         `${participant.fullName} ${participant.phoneNumber}`
           .toLocaleLowerCase("en-US")
-          .includes(normalizedSearch);
-      return matchesFilter && matchesSearch;
-    });
+          .includes(normalizedSearch),
+    );
   }, [participants, paymentFilter, search, selectedEvent]);
 
   const refreshActiveRunDate = useCallback(async (requestId: number) => {
