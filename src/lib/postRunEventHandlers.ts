@@ -11,7 +11,7 @@ import {
 } from "@/lib/postRunApi";
 import {
   createPostRunEvent,
-  listPostRunEvents,
+  listPostRunEventsWithFallback,
   type PostRunEventInput,
 } from "@/lib/postRunEvents";
 
@@ -38,15 +38,23 @@ export async function handleListPostRunEvents(
     );
   }
 
-  const events = (await listPostRunEvents({ includeArchived })).map(
-    toEventResponse,
-  );
+  const result = await listPostRunEventsWithFallback({ includeArchived });
+  const events = result.events.map(toEventResponse);
+
+  const headers: Record<string, string> = {
+    ...POST_RUN_NO_STORE_HEADERS,
+  };
+
+  if (result.source === "cache") {
+    headers["X-Data-Source"] = "cache";
+  }
 
   return NextResponse.json(
     options.bareEvents ? events : { success: true, events },
-    { headers: POST_RUN_NO_STORE_HEADERS },
+    { headers },
   );
 }
+
 
 export async function handleCreatePostRunEvent(
   request: Request,

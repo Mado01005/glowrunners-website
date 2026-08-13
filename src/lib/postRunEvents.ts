@@ -1810,12 +1810,35 @@ async function readEventRows(
     }
 
     const rowIndex = index + 2;
-    const value = parseEventRow(row, rowIndex, columns);
+
+    let value: PostRunEvent;
+
+    try {
+      value = parseEventRow(row, rowIndex, columns);
+    } catch (rowError) {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: "Skipping corrupted post-run event row.",
+          sheet: POST_RUN_EVENTS_SHEET_NAME,
+          rowIndex,
+          error:
+            rowError instanceof Error ? rowError.message : String(rowError),
+        }),
+      );
+      continue;
+    }
 
     if (seenIds.has(value.id)) {
-      throw configurationError(
-        `Duplicate event ID "${value.id}" in ${POST_RUN_EVENTS_SHEET_NAME}.`,
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message: `Skipping duplicate event ID "${value.id}" in ${POST_RUN_EVENTS_SHEET_NAME}.`,
+          sheet: POST_RUN_EVENTS_SHEET_NAME,
+          rowIndex,
+        }),
       );
+      continue;
     }
 
     seenIds.add(value.id);
@@ -2299,6 +2322,11 @@ async function syncParticipantUpdateToEventTab(
   }
 }
 
+let cachedPostRunEvents: {
+  events: PostRunEvent[];
+  updatedAt: number;
+} | null = null;
+
 export async function listPostRunEvents(
   options: Readonly<{ includeArchived?: boolean }> = {},
 ): Promise<PostRunEvent[]> {
@@ -2309,8 +2337,7 @@ export async function listPostRunEvents(
   }
 
   const rows = await readEventRows(columns);
-
-  return rows
+  const events = rows
     .map((row) => row.value)
     .filter((event) => options.includeArchived || event.archivedAt === null)
     .sort((left, right) => {
@@ -2320,6 +2347,46 @@ export async function listPostRunEvents(
         left.title.localeCompare(right.title)
       );
     });
+
+  cachedPostRunEvents = { events, updatedAt: Date.now() };
+
+  return events;
+}
+
+export type PostRunEventsResult = Readonly<{
+  events: PostRunEvent[];
+  source: "live" | "cache";
+}>;
+
+export async function listPostRunEventsWithFallback(
+  options: Readonly<{ includeArchived?: boolean }> = {},
+): Promise<PostRunEventsResult> {
+  try {
+    const events = await listPostRunEvents(options);
+    return { events, source: "live" };
+  } catch (error) {
+    if (cachedPostRunEvents) {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message:
+            "Google Sheets request failed; returning cached post-run events.",
+          cacheAge: `${Math.round((Date.now() - cachedPostRunEvents.updatedAt) / 1_000)}s`,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+
+      let events = cachedPostRunEvents.events;
+
+      if (!options.includeArchived) {
+        events = events.filter((event) => event.archivedAt === null);
+      }
+
+      return { events, source: "cache" };
+    }
+
+    throw error;
+  }
 }
 
 export async function createPostRunEvent(

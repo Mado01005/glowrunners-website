@@ -772,60 +772,106 @@ export function PostRunEventsDashboard() {
     setEventsServiceError(null);
     setEventsConnectionMessage(null);
 
-    try {
-      let result: Awaited<ReturnType<typeof apiRequest>>;
+    const maxRetries = 3;
+    const baseDelay = 1500;
 
+    for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       try {
-        result = await apiRequest(
-          includeArchived
-            ? `${POST_RUN_EVENTS_API}?includeArchived=true`
-            : POST_RUN_EVENTS_API,
+        let result: Awaited<ReturnType<typeof apiRequest>>;
+
+        try {
+          result = await apiRequest(
+            includeArchived
+              ? `${POST_RUN_EVENTS_API}?includeArchived=true`
+              : POST_RUN_EVENTS_API,
+          );
+        } catch {
+          if (attempt < maxRetries) {
+            await new Promise((r) =>
+              setTimeout(r, baseDelay * 2 ** (attempt - 1)),
+            );
+            continue;
+          }
+
+          setEventsConnectionMessage(
+            "\u26A0\uFE0F Connection slow. Retrying sync with Google Sheets...",
+          );
+          setIsLoadingEvents(false);
+          return false;
+        }
+
+        const { response, payload } = result;
+
+        if (response.status === 500 || response.status === 503) {
+          if (attempt < maxRetries) {
+            await new Promise((r) =>
+              setTimeout(r, baseDelay * 2 ** (attempt - 1)),
+            );
+            continue;
+          }
+
+          setEventsServiceError(
+            readError(
+              payload,
+              "\u26A0\uFE0F Connection slow. Retrying sync with Google Sheets...",
+            ),
+          );
+          setIsLoadingEvents(false);
+          return false;
+        }
+
+        if (!response.ok) {
+          setIsLoadingEvents(false);
+          return false;
+        }
+
+        const eventPayload = Array.isArray(payload)
+          ? payload
+          : isObject(payload) && Array.isArray(payload.events)
+            ? payload.events
+            : null;
+
+        if (!eventPayload) {
+          setIsLoadingEvents(false);
+          return false;
+        }
+
+        const nextEvents = eventPayload as PostRunEvent[];
+        setEventsServiceError(null);
+        setEvents(nextEvents);
+        setSelectedEventId((current) =>
+          nextEvents.some((event) => event.id === current)
+            ? current
+            : (nextEvents[0]?.id ?? ""),
         );
+
+        const dataSource = response.headers.get("X-Data-Source");
+
+        if (dataSource === "cache") {
+          setEventsConnectionMessage(
+            "\u26A0\uFE0F Showing cached data. Google Sheets sync is recovering...",
+          );
+        }
+
+        setIsLoadingEvents(false);
+        return true;
       } catch {
-        setEventsConnectionMessage(
-          "The post-run events service could not be reached. Check the connection and retry.",
+        if (attempt >= maxRetries) {
+          setEventsConnectionMessage(
+            "\u26A0\uFE0F Connection slow. Retrying sync with Google Sheets...",
+          );
+          setIsLoadingEvents(false);
+          return false;
+        }
+
+        await new Promise((r) =>
+          setTimeout(r, baseDelay * 2 ** (attempt - 1)),
         );
-        return false;
       }
-
-      const { response, payload } = result;
-
-      if (response.status === 500 || response.status === 503) {
-        setEventsServiceError(
-          readError(
-            payload,
-            "The post-run events service is temporarily unavailable.",
-          ),
-        );
-        return false;
-      }
-
-      if (!response.ok) {
-        return false;
-      }
-
-      const eventPayload = Array.isArray(payload)
-        ? payload
-        : isObject(payload) && Array.isArray(payload.events)
-          ? payload.events
-          : null;
-
-      if (!eventPayload) {
-        return false;
-      }
-
-      const nextEvents = eventPayload as PostRunEvent[];
-      setEventsServiceError(null);
-      setEvents(nextEvents);
-      setSelectedEventId((current) =>
-        nextEvents.some((event) => event.id === current)
-          ? current
-          : (nextEvents[0]?.id ?? ""),
-      );
-      return true;
-    } finally {
-      setIsLoadingEvents(false);
     }
+
+    setIsLoadingEvents(false);
+    return false;
   }, []);
 
   const loadParticipants = useCallback(async (
@@ -1890,22 +1936,58 @@ export function PostRunEventsDashboard() {
         {eventsServiceError &&
         !/initializing|storage|configured/i.test(eventsServiceError) ? (
           <div
-            className="min-w-0 break-words rounded-xl border border-red-800 bg-red-950/60 px-3 py-2 text-xs font-bold text-red-200"
-            role="alert"
+            className="flex min-w-0 flex-wrap items-center gap-2 rounded-xl border border-amber-800 bg-amber-950/50 px-3 py-2 text-xs font-bold text-amber-200"
+            role="status"
             aria-live="polite"
           >
-            {eventsServiceError}
+            <span className="min-w-0 flex-1 break-words">
+              {eventsServiceError}
+            </span>
+            <button
+              type="button"
+              onClick={() => void loadEvents(showArchivedEvents)}
+              disabled={isLoadingEvents}
+              className="shrink-0 rounded-lg border border-amber-700 bg-amber-900/40 px-2.5 py-1 text-[11px] font-black text-amber-100 disabled:opacity-50"
+            >
+              Retry Now
+            </button>
+            <button
+              type="button"
+              onClick={() => setEventsServiceError(null)}
+              className="shrink-0 px-1 text-base leading-none text-amber-400"
+              aria-label="Dismiss"
+            >
+              ×
+            </button>
           </div>
         ) : null}
 
         {eventsConnectionMessage &&
         !/initializing|storage|configured/i.test(eventsConnectionMessage) ? (
           <div
-            className="min-w-0 break-words rounded-xl border border-amber-800 bg-amber-950/50 px-3 py-2 text-xs font-bold text-amber-200"
+            className="flex min-w-0 flex-wrap items-center gap-2 rounded-xl border border-amber-800 bg-amber-950/50 px-3 py-2 text-xs font-bold text-amber-200"
             role="status"
             aria-live="polite"
           >
-            {eventsConnectionMessage}
+            <span className="min-w-0 flex-1 break-words">
+              {eventsConnectionMessage}
+            </span>
+            <button
+              type="button"
+              onClick={() => void loadEvents(showArchivedEvents)}
+              disabled={isLoadingEvents}
+              className="shrink-0 rounded-lg border border-amber-700 bg-amber-900/40 px-2.5 py-1 text-[11px] font-black text-amber-100 disabled:opacity-50"
+            >
+              Retry Now
+            </button>
+            <button
+              type="button"
+              onClick={() => setEventsConnectionMessage(null)}
+              className="shrink-0 px-1 text-base leading-none text-amber-400"
+              aria-label="Dismiss"
+            >
+              ×
+            </button>
           </div>
         ) : null}
 
