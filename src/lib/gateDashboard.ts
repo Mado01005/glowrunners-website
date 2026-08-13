@@ -221,6 +221,10 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
             : participant.depositAmountPaidEgp > 0
               ? "DEPOSIT_PAID"
               : "UNPAID";
+      const isParticipantConfirmed =
+        participant.checkedIn === true ||
+        participant.settlementStatus === "Free" ||
+        participant.settlementStatus === "Fully Cleared";
       const runner: GateRosterEntry = {
         rowIndex: postRunIndex,
         name: participant.name,
@@ -228,13 +232,14 @@ async function loadGateDashboardData(): Promise<GateDashboardData> {
         paymentType: `Post-Run · ${event.title}`,
         status: paymentStatus,
         paymentStatus,
-        checkedIn: false,
+        checkedIn: isParticipantConfirmed,
         amountPaid: participant.depositAmountPaidEgp,
         balanceOwed: participant.remainingBalanceEgp,
         source: "post-run",
         eventId: event.id,
         participantId: participant.id,
       };
+
       postRunIndex -= 1;
       const key = identityKey(runner.name, runner.phone);
 

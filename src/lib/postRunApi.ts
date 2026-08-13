@@ -199,6 +199,10 @@ export function toParticipantResponse(participant: PostRunParticipant) {
       participant.settlementStatus === "Fully Cleared"
         ? "FULLY_CLEARED"
         : "UNPAID",
+    checkedIn:
+      participant.checkedIn === true ||
+      participant.settlementStatus === "Free" ||
+      participant.settlementStatus === "Fully Cleared",
     createdAt: participant.createdAt,
     updatedAt: participant.updatedAt,
     createdByAdmin: participant.createdByAdminPhone,
@@ -206,6 +210,7 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     internalNotes: participant.internalNotes,
   };
 }
+
 
 export function forbiddenPostRunResponse() {
   return NextResponse.json(

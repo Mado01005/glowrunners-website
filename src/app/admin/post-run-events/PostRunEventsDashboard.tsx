@@ -908,8 +908,43 @@ export function PostRunEventsDashboard() {
       }
 
       if (participantsRequestIdRef.current === requestId) {
-        setParticipants(payload.participants as Participant[]);
+        const incoming = payload.participants as Participant[];
+        setParticipants((current) => {
+          if (current.length === 0) {
+            return incoming;
+          }
+          const locallyCleared = new Map(
+            current
+              .filter(
+                (p) =>
+                  p.paymentStatus === "FULLY_CLEARED" ||
+                  p.settlementStatus === "FULLY_CLEARED" ||
+                  p.paymentStatus === "FREE",
+              )
+              .map((p) => [p.id, p]),
+          );
+
+          return incoming.map((p) => {
+            const existing = locallyCleared.get(p.id);
+            if (
+              existing &&
+              p.paymentStatus !== "FULLY_CLEARED" &&
+              p.paymentStatus !== "FREE"
+            ) {
+              return {
+                ...p,
+                paymentStatus: existing.paymentStatus,
+                settlementStatus: existing.settlementStatus,
+                amountPaid: Math.max(p.amountPaid, existing.amountPaid),
+                depositPaid: Math.max(p.depositPaid, existing.depositPaid),
+                remainingBalance: 0,
+              };
+            }
+            return p;
+          });
+        });
       }
+
     } catch (error) {
       if (participantsRequestIdRef.current === requestId) {
         setNotice({

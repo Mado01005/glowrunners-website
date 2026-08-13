@@ -10,6 +10,28 @@ import {
   withGoogleSheetsRetry,
 } from "@/lib/googleSheets";
 
+export const parseCheckedInCell = (val: unknown): boolean => {
+  if (val === true || val === 1) return true;
+  if (!val) return false;
+
+
+  const str = val.toString().trim().toLowerCase();
+  return (
+    str === "true" ||
+    str === "yes" ||
+    str === "1" ||
+    str === "confirmed" ||
+    str === "cleared" ||
+    str === "checked-in" ||
+    str === "checked in" ||
+    str === "x" ||
+    str === "✅ confirmed" ||
+    str === "fully cleared" ||
+    str === "[x]" ||
+    str === "[ x ]"
+  );
+};
+
 export const POST_RUN_EVENTS_SHEET_NAME = "PostRunEvents";
 export const POST_RUN_PARTICIPANTS_SHEET_NAME = "PostRunParticipants";
 export const POST_RUN_PARTICIPANT_UPDATES_SHEET_NAME =
@@ -20,7 +42,7 @@ const POST_RUN_EVENT_TAB_HEADERS = [
   "Payment Status",
   "Amount Paid",
   "Balance Owed",
-  "Timestamp",
+  "Confirmed?",
 ] as const;
 
 export const POST_RUN_DEPOSIT_STATUSES = ["Pending", "Verified"] as const;
@@ -79,6 +101,7 @@ export type PostRunParticipant = Readonly<{
   paymentScreenshotUrl: string | null;
   remainingBalanceEgp: number;
   settlementStatus: PostRunSettlementStatus;
+  checkedIn?: boolean;
   createdAt: string;
   updatedAt: string;
   createdByAdminPhone: string;
@@ -87,6 +110,7 @@ export type PostRunParticipant = Readonly<{
   deletedAt: string | null;
   deletedByAdminPhone: string | null;
 }>;
+
 
 export type PostRunParticipantInput = Readonly<{
   name: string;
@@ -1551,6 +1575,7 @@ function parseParticipantRow(
       getCell(row, columns, "internalNotes"),
       "CONFIGURATION",
     ),
+    checkedIn: parseCheckedInCell(row[5]), // Column F (Confirmed?)
     deletedAt: optionalTimestamp(
       getCell(row, columns, "deletedAt"),
       "Deleted at",
@@ -1563,6 +1588,7 @@ function parseParticipantRow(
     ),
   };
 }
+
 
 function parseParticipantUpdateRow(
   row: readonly unknown[],
@@ -2211,13 +2237,19 @@ async function syncParticipantToEventTab(
       participant.whatsappPhone,
     );
 
+    const isCleared =
+      participant.settlementStatus === "Fully Cleared" ||
+      participant.settlementStatus === "Free" ||
+      participant.checkedIn === true;
+    const colFValue = isCleared ? "TRUE" : "FALSE";
+
     const rowValues = [
       participant.name,
       formattedPhone,
       eventTabPaymentStatus(participant),
       participant.depositAmountPaidEgp,
       participant.remainingBalanceEgp,
-      participant.createdAt,
+      colFValue,
     ];
 
     await withGoogleSheetsIdempotentMutationRetry(
@@ -2245,8 +2277,7 @@ async function syncParticipantToEventTab(
 
           return (
             String(row[0] ?? "").trim() === participant.name &&
-            storedContact === participant.whatsappPhone &&
-            String(row[5] ?? "").trim() === participant.createdAt
+            storedContact === participant.whatsappPhone
           );
         });
       },
@@ -2285,8 +2316,7 @@ async function syncParticipantUpdateToEventTab(
 
       return (
         String(row[0] ?? "").trim() === previousParticipant.name &&
-        storedContact === previousParticipant.whatsappPhone &&
-        String(row[5] ?? "").trim() === previousParticipant.createdAt
+        storedContact === previousParticipant.whatsappPhone
       );
     });
 
@@ -2294,11 +2324,17 @@ async function syncParticipantUpdateToEventTab(
       return;
     }
 
+    const isCleared =
+      participant.settlementStatus === "Fully Cleared" ||
+      participant.settlementStatus === "Free" ||
+      participant.checkedIn === true;
+    const colFValue = isCleared ? "TRUE" : "FALSE";
+
     const rowNumber = rowOffset + 2;
     await withGoogleSheetsRetry(`update participant in ${tabName} tab`, () =>
       sheets.spreadsheets.values.update({
         spreadsheetId: GOOGLE_SPREADSHEET_ID,
-        range: `${quoteSheetName(tabName)}!A${rowNumber}:E${rowNumber}`,
+        range: `${quoteSheetName(tabName)}!A${rowNumber}:F${rowNumber}`,
         valueInputOption: "RAW",
         requestBody: {
           values: [[
@@ -2307,6 +2343,7 @@ async function syncParticipantUpdateToEventTab(
             eventTabPaymentStatus(participant),
             participant.depositAmountPaidEgp,
             participant.remainingBalanceEgp,
+            colFValue,
           ]],
         },
       }),
@@ -2321,6 +2358,7 @@ async function syncParticipantUpdateToEventTab(
     );
   }
 }
+
 
 let cachedPostRunEvents: {
   events: PostRunEvent[];

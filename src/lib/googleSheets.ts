@@ -3,11 +3,14 @@ import { resolve } from "node:path";
 import type { JWTInput } from "google-auth-library";
 import { google, type sheets_v4 } from "googleapis";
 import { isConfirmedAttendanceStatus } from "@/lib/attendanceStatus";
+import { parseCheckedInCell } from "@/lib/gateRunnerStatus";
 import {
   parseAttendanceSheetDate,
   selectLatestAttendanceDate,
   type ResolvedAttendanceDate,
 } from "@/lib/attendanceSheetDate";
+
+export { parseCheckedInCell };
 
 const DEFAULT_SPREADSHEET_ID =
   "1MJApZDOATx8vZUGKBtaHOFnIo831lSZJHl8KUJEaguM";
@@ -17,8 +20,9 @@ export const GOOGLE_SPREADSHEET_ID =
   DEFAULT_SPREADSHEET_ID;
 
 const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
-const CONFIRMED_VALUE = "✅ CONFIRMED";
 const DEFAULT_TIME_ZONE = "Africa/Cairo";
+
+
 const GOOGLE_CREDENTIAL_ENV_NAMES = [
   "GOOGLE_CREDENTIALS_JSON",
   "GOOGLE_SHEETS_CREDENTIALS",
@@ -940,6 +944,14 @@ export async function findRunnerByPhone(
       sheetPhone &&
       normalizeEgyptianMobilePhone(sheetPhone) === normalizedScannedPhone
     ) {
+      const rawStatus = String(row[columns.status] ?? "").trim().slice(0, 40);
+      const colFCheckedIn = parseCheckedInCell(row[5]);
+      const status =
+        (colFCheckedIn || parseCheckedInCell(rawStatus)) &&
+        !isConfirmedAttendanceStatus(rawStatus)
+          ? "✅ CONFIRMED"
+          : rawStatus;
+
       const match: RunnerLookupResult = {
         rowIndex: index + 1,
         fullName,
@@ -947,7 +959,7 @@ export async function findRunnerByPhone(
         paymentType:
           String(row[columns.paymentType] ?? "").trim().slice(0, 40) ||
           "Unknown",
-        status: String(row[columns.status] ?? "").trim().slice(0, 40),
+        status,
       };
 
       if (preferredRowIndex === match.rowIndex) {
@@ -974,7 +986,13 @@ export async function getAttendanceRoster(
     const contact = normalizeRosterContact(row[columns.phone]);
     const paymentType =
       String(row[columns.paymentType] ?? "").trim().slice(0, 40) || "Unknown";
-    const status = String(row[columns.status] ?? "").trim().slice(0, 40);
+    const rawStatus = String(row[columns.status] ?? "").trim().slice(0, 40);
+    const colFCheckedIn = parseCheckedInCell(row[5]); // Column F (Confirmed?)
+    const status =
+      (colFCheckedIn || parseCheckedInCell(rawStatus)) &&
+      !isConfirmedAttendanceStatus(rawStatus)
+        ? "✅ CONFIRMED"
+        : rawStatus;
 
     if (!name) {
       continue;
@@ -1048,6 +1066,11 @@ export async function updateAttendanceRunner(
     );
   }
 
+  const isConfirmed =
+    isConfirmedAttendanceStatus(patch.status) ||
+    parseCheckedInCell(patch.status);
+  const statusValue = isConfirmed ? "TRUE" : patch.status.trim();
+
   const sheets = await getSheetsClient();
   const headerWrites = columns.missingHeaders.map((field) => ({
     range: `${quoteSheetName(sheetName)}!${columnIndexToA1(columns[field])}1`,
@@ -1057,7 +1080,7 @@ export async function updateAttendanceRunner(
     name: patch.name.trim(),
     phone: serializeRosterContact(patch.phone),
     paymentType: patch.paymentType.trim(),
-    status: patch.status.trim(),
+    status: statusValue,
     amountPaid: safeAttendanceMoney(patch.amountPaid),
     balanceOwed: safeAttendanceMoney(patch.balanceOwed),
   };
@@ -1069,6 +1092,13 @@ export async function updateAttendanceRunner(
     )}${rowIndex}`,
     values: [[value]],
   }));
+
+  if (isConfirmed && columnIndexToA1(columns.status) !== "F") {
+    runnerWrites.push({
+      range: `${quoteSheetName(sheetName)}!F${rowIndex}`,
+      values: [["TRUE"]],
+    });
+  }
 
   await withGoogleSheetsRetry(
     `update attendance runner row ${rowIndex} in ${sheetName}`,
@@ -1222,8 +1252,16 @@ export async function markAsConfirmed(
             range: `${quoteSheetName(
               sheetName,
             )}!${statusColumn}${rowIndex}`,
-            values: [[CONFIRMED_VALUE]],
+            values: [["TRUE"]],
           },
+          ...(statusColumn !== "F"
+            ? [
+                {
+                  range: `${quoteSheetName(sheetName)}!F${rowIndex}`,
+                  values: [["TRUE"]],
+                },
+              ]
+            : []),
         ],
       },
     }),
@@ -1240,8 +1278,10 @@ export async function getConfirmedAttendanceCount(
   const startIndex = columns.hasHeaderRow ? 1 : 0;
 
   return rows.slice(startIndex).reduce((count, row) => {
-    return isConfirmedAttendanceStatus(row[columns.status])
+    return isConfirmedAttendanceStatus(row[columns.status]) ||
+      parseCheckedInCell(row[5])
       ? count + 1
       : count;
   }, 0);
 }
+

@@ -730,7 +730,58 @@ export function GateControlDashboard() {
       }
 
       if (mountedRef.current) {
-        setDashboard(parsed);
+        setDashboard((current) => {
+          if (current.roster.length === 0) {
+            return parsed;
+          }
+
+          const locallyConfirmedRows = new Set(
+            current.roster
+              .filter((r) => r.checkedIn || isConfirmed(r))
+              .map((r) => r.rowIndex),
+          );
+          const locallyConfirmedKeys = new Set(
+            current.roster
+              .filter((r) => r.checkedIn || isConfirmed(r))
+              .map(
+                (r) =>
+                  `${r.name.trim().toLowerCase()}:${normalizePhone(r.phone)}`,
+              ),
+          );
+
+          const mergedRoster = parsed.roster.map((incoming) => {
+            const key = `${incoming.name.trim().toLowerCase()}:${normalizePhone(
+              incoming.phone,
+            )}`;
+            const wasConfirmedLocally =
+              locallyConfirmedRows.has(incoming.rowIndex) ||
+              locallyConfirmedKeys.has(key);
+
+            if (
+              wasConfirmedLocally &&
+              !incoming.checkedIn &&
+              !isConfirmed(incoming)
+            ) {
+              return {
+                ...incoming,
+                checkedIn: true,
+                status: "CONFIRMED",
+                paymentStatus: "CONFIRMED",
+              };
+            }
+            return incoming;
+          });
+
+          const counters = summarizeRosterCounters(mergedRoster);
+
+          return {
+            ...parsed,
+            roster: mergedRoster,
+            confirmed: counters.confirmed,
+            pending: counters.pending,
+            total: counters.total,
+          };
+        });
         if (force) {
           const runnerByRow = new Map(
             parsed.roster.map((runner) => [runner.rowIndex, runner]),
@@ -752,6 +803,7 @@ export function GateControlDashboard() {
             : current,
         );
       }
+
     } catch (error) {
       if (mountedRef.current) {
         setFeedback({

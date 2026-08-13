@@ -1,3 +1,25 @@
+export const parseCheckedInCell = (val: unknown): boolean => {
+  if (val === true || val === 1) return true;
+  if (!val) return false;
+
+
+  const str = val.toString().trim().toLowerCase();
+  return (
+    str === "true" ||
+    str === "yes" ||
+    str === "1" ||
+    str === "confirmed" ||
+    str === "cleared" ||
+    str === "checked-in" ||
+    str === "checked in" ||
+    str === "x" ||
+    str === "✅ confirmed" ||
+    str === "fully cleared" ||
+    str === "[x]" ||
+    str === "[ x ]"
+  );
+};
+
 export type GateRunnerStatusInput = Readonly<{
   paymentStatus?: unknown;
   status?: unknown;
@@ -34,6 +56,9 @@ export function evaluateRunnerState(
   const owed = safeMoney(runner.balanceOwed);
   const isFree = status === "FREE" || status === "FREE ATTENDEE";
   const isConfirmed =
+    parseCheckedInCell(runner.checkedIn) ||
+    parseCheckedInCell(runner.status) ||
+    parseCheckedInCell(runner.paymentStatus) ||
     status === "CLEARED" ||
     status === "FULLY_CLEARED" ||
     status === "FULLY CLEARED" ||
@@ -41,8 +66,8 @@ export function evaluateRunnerState(
     status === "✅ CONFIRMED" ||
     /^\[\s*X\s*\]$/u.test(status) ||
     status === "PAID" ||
+    status === "TRUE" ||
     isFree ||
-    runner.checkedIn === true ||
     (owed === 0 && paid > 0);
   const isOwed = owed > 0;
   const isPending = !isConfirmed;
@@ -61,3 +86,4 @@ export function isPendingRunner(runner: GateRunnerStatusInput): boolean {
 export function isOwedRunner(runner: GateRunnerStatusInput): boolean {
   return evaluateRunnerState(runner).isOwed;
 }
+
