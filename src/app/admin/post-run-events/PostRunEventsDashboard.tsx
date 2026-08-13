@@ -1622,6 +1622,31 @@ export function PostRunEventsDashboard() {
 
     const reportMoney = (value: number) =>
       safeNonNegativeNumber(value).toLocaleString("en-US");
+    const participantRoster = participants.map((participant) => {
+      const state = paymentState(participant, selectedEvent);
+      const contact = participant.phoneNumber.trim() || "No contact";
+      const participantLabel = `• ${participant.fullName} (${contact})`;
+
+      if (state.kind === "free") {
+        return `${participantLabel} – 🎁 Free Attendee`;
+      }
+
+      if (state.kind === "cleared") {
+        return `${participantLabel} – ✅ Cleared (${reportMoney(
+          state.amountPaid,
+        )} EGP paid)`;
+      }
+
+      if (state.kind === "deposit") {
+        return `${participantLabel} – 🟡 Deposit Paid (${reportMoney(
+          state.amountPaid,
+        )} EGP paid | ${reportMoney(state.remaining)} EGP owed)`;
+      }
+
+      return `${participantLabel} – 🔴 Unpaid (0 EGP paid | ${reportMoney(
+        state.remaining,
+      )} EGP owed)`;
+    });
     const report = [
       `📊 GlowRunners Post-Run Report – ${selectedEvent.title}`,
       `📅 ${formatEventDate(selectedEvent.runDate)}`,
@@ -1629,6 +1654,11 @@ export function PostRunEventsDashboard() {
       `💰 Expected Revenue: ${reportMoney(totals.expected)} EGP`,
       `✅ Total Collected: ${reportMoney(totals.collected)} EGP`,
       `🟡 Remaining Balance: ${reportMoney(totals.remaining)} EGP`,
+      "",
+      "──────────────────────────────",
+      "📋 PARTICIPANT ROSTER",
+      "",
+      ...participantRoster,
     ].join("\n");
 
     try {
