@@ -1606,7 +1606,7 @@ export function PostRunEventsDashboard() {
     }
   };
 
-  const openParticipant = (participant: Participant) => {
+  const handleOpenEditModal = (participant: Participant) => {
     setSelectedParticipantId(participant.id);
     setParticipantNameDraft(participant.fullName);
     setParticipantContactDraft(participant.phoneNumber);
@@ -2117,13 +2117,13 @@ export function PostRunEventsDashboard() {
                         <article
                           key={participant.id}
                           data-testid="compact-participant-row"
-                          className="grid min-h-[104px] min-w-0 grid-cols-[minmax(0,1fr)_88px] border-b border-zinc-800 bg-zinc-950 last:border-b-0"
+                          className="grid min-h-16 min-w-0 grid-cols-[minmax(0,1fr)_76px] border-b border-zinc-800 bg-zinc-950 last:border-b-0"
                         >
                           <button
                             type="button"
-                            onClick={() => openParticipant(participant)}
+                            onClick={() => handleOpenEditModal(participant)}
                             className="grid h-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 px-2 text-left outline-none focus:bg-zinc-900"
-                            aria-label={`Open ${participant.fullName} participant details`}
+                            aria-label={`Edit ${participant.fullName}`}
                           >
                             <span className="min-w-0">
                               <span className="block truncate text-[11px] font-black leading-tight">
@@ -2131,11 +2131,6 @@ export function PostRunEventsDashboard() {
                               </span>
                               <span className="block truncate text-[9px] font-bold tabular-nums text-zinc-500">
                                 {participant.phoneNumber || "No contact provided"}
-                              </span>
-                              <span className="mt-1 block truncate text-[9px] font-black tabular-nums text-amber-300">
-                                {isCleared
-                                  ? "0 EGP owed"
-                                  : `${formatCompactMoney(state.remaining)} EGP owed`}
                               </span>
                             </span>
                             <span
@@ -2152,15 +2147,12 @@ export function PostRunEventsDashboard() {
                               {state.label}
                             </span>
                           </button>
-                          <div className="flex h-full min-w-0 flex-col items-stretch justify-center gap-2 border-l border-zinc-800 p-1.5">
-                            <button
-                              type="button"
-                              disabled={isSelectedEventArchived || isAnyBusy}
-                              onClick={() => openParticipant(participant)}
-                              className="min-h-11 rounded-md border border-sky-800 bg-sky-950 px-1 text-[10px] font-black text-sky-200 disabled:border-zinc-800 disabled:text-zinc-600"
-                            >
-                              ✏️ Edit
-                            </button>
+                          <div className="flex h-full min-w-0 flex-col items-stretch justify-center gap-1 border-l border-zinc-800 px-1">
+                            <span className="truncate text-center text-[8px] font-black tabular-nums text-amber-300">
+                              {isCleared
+                                ? "0 owed"
+                                : `${formatCompactMoney(state.remaining)} owed`}
+                            </span>
                             <button
                               type="button"
                               disabled={
@@ -2169,11 +2161,14 @@ export function PostRunEventsDashboard() {
                                 state.kind === "free" ||
                                 isAnyBusy
                               }
-                              onClick={() => void clearParticipant(participant)}
-                            className="min-h-11 rounded-md bg-emerald-400 px-1 text-[10px] font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
-                          >
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void clearParticipant(participant);
+                              }}
+                              className="min-h-11 rounded-md bg-emerald-400 px-1 text-[10px] font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
+                            >
                               {isBusy ? "…" : isCleared ? "✓" : "Clear"}
-                          </button>
+                            </button>
                           </div>
                         </article>
                       );
