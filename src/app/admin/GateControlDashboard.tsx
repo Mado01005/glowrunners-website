@@ -11,6 +11,7 @@ import {
 } from "react";
 import type { Html5Qrcode } from "html5-qrcode";
 import { evaluateRunnerState } from "@/lib/gateRunnerStatus";
+import { findRunnerFromQrPayload } from "@/lib/gateQrPayload";
 
 type RosterEntry = Readonly<{
   rowIndex: number;
@@ -26,6 +27,8 @@ type RosterEntry = Readonly<{
   eventId?: string;
   participantId?: string;
 }>;
+
+type CameraOption = Readonly<{ id: string; label: string }>;
 
 type GateEventSettings = Readonly<{
   title: string;
@@ -540,6 +543,30 @@ function displayContact(value: string): string {
   return /^\d+$/.test(value) ? `0${value}` : value;
 }
 
+function playScanSuccessBeep() {
+  navigator.vibrate?.(80);
+
+  try {
+    const AudioContextClass = window.AudioContext ||
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioContextClass) return;
+    const context = new AudioContextClass();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.frequency.value = 880;
+    gain.gain.setValueAtTime(0.08, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.12);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.12);
+    oscillator.addEventListener("ended", () => void context.close(), { once: true });
+  } catch {
+    // Visual confirmation remains available when audio is blocked.
+  }
+}
+
 async function readJson(response: Response): Promise<unknown> {
   return response.json().catch(() => null);
 }
@@ -581,6 +608,11 @@ export function GateControlDashboard() {
     "idle" | "starting" | "live" | "error"
   >("idle");
   const [scannerKey, setScannerKey] = useState(0);
+  const [cameraOptions, setCameraOptions] = useState<CameraOption[]>([]);
+  const [selectedCameraId, setSelectedCameraId] = useState("");
+  const [isScanSuccess, setIsScanSuccess] = useState(false);
+  const [quickCheckIn, setQuickCheckIn] = useState("");
+  const [isQuickCheckingIn, setIsQuickCheckingIn] = useState(false);
   const [offlineQueue, setOfflineQueue] = useState<OfflineCheckIn[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
@@ -615,6 +647,8 @@ export function GateControlDashboard() {
   const syncInFlightRef = useRef(false);
   const mountedRef = useRef(true);
   const scanHandlerRef = useRef<(decoded: string) => void>(() => undefined);
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const scanResumeTimerRef = useRef<number | null>(null);
   const lastScannedRef = useRef<{ value: string; at: number }>({
     value: "",
     at: 0,
@@ -1311,23 +1345,115 @@ export function GateControlDashboard() {
     releaseLock,
   ]);
 
+  const quickConfirmRunner = useCallback(
+    async (runner: RosterEntry) => {
+      if (isConfirmed(runner)) {
+        setFeedback({
+          tone: "idle",
+          message: `${runner.name} is already confirmed.`,
+        });
+        return false;
+      }
+
+      if (runner.source !== "attendance") {
+        setFeedback({
+          tone: "error",
+          message: `${runner.name} is synced from ${
+            runner.source === "post-run" ? "Post-Run Events" : "the walk-in ledger"
+          } and cannot be checked into the Attendance sheet from this scanner.`,
+        });
+        return false;
+      }
+
+      const optimistic: RosterEntry = {
+        ...runner,
+        status: "CONFIRMED",
+        paymentStatus: "CONFIRMED",
+        checkedIn: true,
+      };
+      replaceRunnerInDashboard(optimistic);
+      setIsQuickCheckingIn(true);
+
+      try {
+        const phone = normalizePhone(runner.phone);
+        const hasValidEgyptianPhone = /^(?:10|11|12|15)\d{8}$/.test(phone);
+        const response = hasValidEgyptianPhone
+          ? await fetch("/api/scan-ticket", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                operationId: crypto.randomUUID(),
+                phone: runner.phone,
+                runnerName: runner.name,
+                runnerRow: runner.rowIndex,
+                paymentMethod: runner.paymentType,
+                amountDue: 0,
+                amountReceived: 0,
+                changeOwed: 0,
+              }),
+            })
+          : await fetch("/api/admin/roster", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                rowIndex: runner.rowIndex,
+                expectedName: runner.name,
+                expectedPhone: runner.phone,
+                name: runner.name,
+                phone: runner.phone,
+                paymentType: runner.paymentType,
+                status: "CONFIRMED",
+                amountPaid: runner.amountPaid,
+                balanceOwed: runner.balanceOwed,
+              }),
+            });
+        const payload = await readJson(response);
+
+        if (handleUnauthorized(response)) return false;
+        if (!response.ok) {
+          throw new Error(readError(payload, "Unable to check in this runner."));
+        }
+
+        if (isRecord(payload) && isRecord(payload.runner)) {
+          const authoritative = parseRoster([payload.runner])[0];
+          if (authoritative) replaceRunnerInDashboard(authoritative);
+        }
+
+        playScanSuccessBeep();
+        setIsScanSuccess(true);
+        window.setTimeout(() => setIsScanSuccess(false), 1_000);
+        setFeedback({ tone: "success", message: `${runner.name} is checked in.` });
+        void loadActivity();
+        return true;
+      } catch (error) {
+        replaceRunnerInDashboard(runner);
+        setFeedback({
+          tone: "error",
+          message:
+            error instanceof Error ? error.message : "Unable to check in this runner.",
+        });
+        return false;
+      } finally {
+        setIsQuickCheckingIn(false);
+      }
+    },
+    [handleUnauthorized, loadActivity],
+  );
+
   useEffect(() => {
     scanHandlerRef.current = (decoded: string) => {
-      const phone = normalizePhone(decoded);
+      const normalizedPayload = decoded.trim();
       const now = Date.now();
 
       if (
-        !phone ||
-        (lastScannedRef.current.value === phone &&
-          now - lastScannedRef.current.at < 2_000)
+        !normalizedPayload ||
+        now - lastScannedRef.current.at < 1_500
       ) {
         return;
       }
 
-      lastScannedRef.current = { value: phone, at: now };
-      const runner = dashboard.roster.find(
-        (candidate) => normalizePhone(candidate.phone) === phone,
-      );
+      lastScannedRef.current = { value: normalizedPayload, at: now };
+      const runner = findRunnerFromQrPayload(dashboard.roster, normalizedPayload);
 
       if (!runner) {
         setFeedback({
@@ -1337,9 +1463,22 @@ export function GateControlDashboard() {
         return;
       }
 
-      void beginPayment(runner);
+      try {
+        scannerRef.current?.pause(true);
+      } catch {
+        // Duplicate protection still applies if this browser cannot pause video.
+      }
+      if (scanResumeTimerRef.current) window.clearTimeout(scanResumeTimerRef.current);
+      scanResumeTimerRef.current = window.setTimeout(() => {
+        try {
+          scannerRef.current?.resume();
+        } catch {
+          // Scanner may have been stopped or switched while throttled.
+        }
+      }, 1_500);
+      void quickConfirmRunner(runner);
     };
-  }, [beginPayment, dashboard.roster]);
+  }, [dashboard.roster, quickConfirmRunner]);
 
   useEffect(() => {
     if (!isScannerEnabled) {
@@ -1360,9 +1499,30 @@ export function GateControlDashboard() {
           return;
         }
 
+        const cameras = await qrLibrary.Html5Qrcode.getCameras();
+        if (cancelled) return;
+        const options = cameras.map((camera, index) => ({
+          id: camera.id,
+          label: camera.label || `Camera ${index + 1}`,
+        }));
+        setCameraOptions(options);
+        const rearCamera = options.find((camera) =>
+          /back|rear|environment/i.test(camera.label),
+        );
+        const resolvedCameraId =
+          options.find((camera) => camera.id === selectedCameraId)?.id ||
+          rearCamera?.id ||
+          options[0]?.id ||
+          "";
+        if (resolvedCameraId && resolvedCameraId !== selectedCameraId) {
+          setSelectedCameraId(resolvedCameraId);
+          return;
+        }
+
         scanner = new qrLibrary.Html5Qrcode(SCANNER_ID);
+        scannerRef.current = scanner;
         await scanner.start(
-          { facingMode: "environment" },
+          resolvedCameraId || { facingMode: "environment" },
           {
             fps: 10,
             qrbox: (width, height) => {
@@ -1384,7 +1544,7 @@ export function GateControlDashboard() {
           setFeedback({
             tone: "error",
             message:
-              "Camera unavailable. Use the roster search or allow camera access and retry.",
+              "📷 Camera access blocked or unavailable. Please grant camera permission in browser settings, or use the manual search box below.",
           });
         }
       }
@@ -1396,8 +1556,31 @@ export function GateControlDashboard() {
       if (scanner) {
         void stopScanner(scanner);
       }
+      if (scannerRef.current === scanner) scannerRef.current = null;
+      if (scanResumeTimerRef.current) {
+        window.clearTimeout(scanResumeTimerRef.current);
+        scanResumeTimerRef.current = null;
+      }
     };
-  }, [isScannerEnabled, scannerKey]);
+  }, [isScannerEnabled, scannerKey, selectedCameraId]);
+
+  const submitQuickCheckIn = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const lookup = quickCheckIn.trim();
+    if (!lookup || isQuickCheckingIn) return;
+
+    const runner = findRunnerFromQrPayload(dashboard.roster, lookup);
+    if (!runner) {
+      setFeedback({
+        tone: "error",
+        message: `No runner matches “${lookup}”. Try a full phone number, @username, exact name, or ticket ID.`,
+      });
+      return;
+    }
+
+    const succeeded = await quickConfirmRunner(runner);
+    if (succeeded) setQuickCheckIn("");
+  };
 
   const walkInReceivedAmount = Number(walkInAmount);
   const hasValidWalkInAmount =
@@ -2208,7 +2391,31 @@ export function GateControlDashboard() {
         </section>
 
         <section className="min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-[#151515] p-3">
-          <div className="relative flex min-h-[270px] w-full min-w-0 items-center justify-center overflow-hidden rounded-xl bg-black">
+          {cameraOptions.length > 1 ? (
+            <label className="mb-3 block min-w-0">
+              <span className="mb-1 block text-[10px] font-black uppercase tracking-[0.08em] text-zinc-500">
+                Camera
+              </span>
+              <select
+                value={selectedCameraId}
+                onChange={(event) => setSelectedCameraId(event.target.value)}
+                className="min-h-11 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white outline-none focus:border-pink-400"
+              >
+                {cameraOptions.map((camera) => (
+                  <option key={camera.id} value={camera.id}>
+                    {camera.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <div
+            className={`relative flex min-h-[270px] w-full min-w-0 items-center justify-center overflow-hidden rounded-xl border-2 bg-black transition-colors duration-150 ${
+              isScanSuccess
+                ? "border-emerald-400 shadow-[0_0_22px_rgba(52,211,153,0.55)]"
+                : "border-transparent"
+            }`}
+          >
             <div
               id={SCANNER_ID}
               className="h-full min-h-[270px] w-full overflow-hidden"
@@ -2222,7 +2429,7 @@ export function GateControlDashboard() {
                   {scannerStatus === "starting"
                     ? "Starting rear camera…"
                     : scannerStatus === "error"
-                      ? "Camera is inactive"
+                      ? "📷 Camera access blocked or unavailable. Please grant camera permission in browser settings, or use the manual search box below."
                       : "QR viewfinder is inactive"}
                 </p>
               </div>
@@ -2243,6 +2450,29 @@ export function GateControlDashboard() {
                 ? "Starting Scanner…"
                 : "📷 Start Scanner"}
           </button>
+
+          <form onSubmit={submitQuickCheckIn} className="mt-3 min-w-0">
+            <label className="block min-w-0">
+              <span className="mb-1 block text-[10px] font-black uppercase tracking-[0.08em] text-zinc-500">
+                ⚡ Quick Check-In Input
+              </span>
+              <input
+                value={quickCheckIn}
+                onChange={(event) => setQuickCheckIn(event.target.value)}
+                placeholder="Phone, @username, exact name, or ticket ID"
+                autoComplete="off"
+                disabled={isQuickCheckingIn}
+                className="min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-400 disabled:opacity-60"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={!quickCheckIn.trim() || isQuickCheckingIn}
+              className="mt-2 min-h-11 w-full rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 text-sm font-black text-emerald-300 disabled:opacity-40"
+            >
+              {isQuickCheckingIn ? "Checking In…" : "⚡ Check In Now"}
+            </button>
+          </form>
         </section>
 
         <section className="min-w-0 rounded-2xl border border-white/10 bg-[#151515] p-3">
