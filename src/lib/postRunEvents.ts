@@ -91,6 +91,7 @@ export type PostRunParticipant = Readonly<{
 export type PostRunParticipantInput = Readonly<{
   name: string;
   whatsappPhone: string;
+  force?: boolean;
   depositStatus?: PostRunDepositStatus;
   depositAmountPaidEgp?: number;
   paymentScreenshotUrl?: string | null;
@@ -99,6 +100,8 @@ export type PostRunParticipantInput = Readonly<{
 }>;
 
 export type PostRunParticipantPatch = Readonly<{
+  name?: string;
+  whatsappPhone?: string;
   depositStatus?: PostRunDepositStatus;
   depositAmountPaidEgp?: number;
   paymentScreenshotUrl?: string | null;
@@ -1589,6 +1592,8 @@ function parseParticipantUpdateRow(
   }
 
   const allowedKeys = new Set([
+    "name",
+    "whatsappPhone",
     "depositStatus",
     "depositAmountPaidEgp",
     "paymentScreenshotUrl",
@@ -1606,6 +1611,8 @@ function parseParticipantUpdateRow(
   }
 
   const patch: {
+    name?: string;
+    whatsappPhone?: string;
     depositStatus?: PostRunDepositStatus;
     depositAmountPaidEgp?: number;
     paymentScreenshotUrl?: string | null;
@@ -1614,6 +1621,22 @@ function parseParticipantUpdateRow(
     deletedAt?: string | null;
     deletedByAdminPhone?: string | null;
   } = {};
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "name")) {
+    patch.name = requireStoredText(
+      rawPatch.name,
+      "Participant name",
+      rowIndex,
+      MAX_NAME_LENGTH,
+    );
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "whatsappPhone")) {
+    patch.whatsappPhone = normalizeParticipantContact(
+      rawPatch.whatsappPhone,
+      "CONFIGURATION",
+    );
+  }
 
   if (Object.prototype.hasOwnProperty.call(rawPatch, "depositStatus")) {
     patch.depositStatus = normalizeDepositStatus(
@@ -1738,6 +1761,9 @@ function applyParticipantUpdate(
 
   return {
     ...current,
+    name: update.patch.name ?? current.name,
+    whatsappPhone:
+      update.patch.whatsappPhone ?? current.whatsappPhone,
     depositStatus,
     depositAmountPaidEgp,
     paymentScreenshotUrl:
@@ -2044,6 +2070,7 @@ async function reconcileParticipantAddition(
   event: PostRunEvent,
   participant: PostRunParticipant,
   columns: PostRunSheetColumns,
+  allowDuplicateContact: boolean,
 ): Promise<PostRunParticipant> {
   await new Promise((resolve) => setTimeout(resolve, 125));
 
@@ -2056,60 +2083,42 @@ async function reconcileParticipantAddition(
   )
     .filter((row) => row.value.deletedAt === null)
     .sort(compareParticipantRows);
-  const uniquePhoneRows: ParticipantRow[] = [];
-  const seenPhones = new Set<string>();
-  const duplicateRows: ParticipantRow[] = [];
-
-  for (const row of rows) {
-    const contactKey = row.value.whatsappPhone.trim().toLocaleLowerCase("en-US");
-
-    if (!contactKey || contactKey === "-") {
-      uniquePhoneRows.push(row);
-      continue;
-    }
-
-    if (seenPhones.has(contactKey)) {
-      duplicateRows.push(row);
-      continue;
-    }
-
-    seenPhones.add(contactKey);
-    uniquePhoneRows.push(row);
-  }
-
-  const capacityRows =
-    event.maxCapacity === null
-      ? uniquePhoneRows
-      : uniquePhoneRows.slice(0, event.maxCapacity);
-  const capacityWinnerIds = new Set(capacityRows.map((row) => row.value.id));
-  const capacityLosers = uniquePhoneRows.filter(
-    (row) => !capacityWinnerIds.has(row.value.id),
-  );
-  const loserRows = [...duplicateRows, ...capacityLosers];
-
-  await clearParticipantRows(loserRows.map((row) => row.rowIndex));
-
   const addedRow = rows.find((row) => row.value.id === participant.id);
 
-  if (!addedRow || loserRows.some((row) => row.value.id === participant.id)) {
-    const participantContactKey = participant.whatsappPhone
-      .trim()
-      .toLocaleLowerCase("en-US");
-    const phoneWinner = participantContactKey
-      ? uniquePhoneRows.find(
-          (row) =>
-            row.value.whatsappPhone.trim().toLocaleLowerCase("en-US") ===
-            participantContactKey,
-        )
-      : undefined;
+  if (!addedRow) {
+    throw new PostRunEventsError(
+      "CAPACITY_REACHED",
+      `"${event.title}" reached capacity while this participant was being added.`,
+    );
+  }
 
-    if (participantContactKey && phoneWinner?.value.id !== participant.id) {
+  const participantContactKey = participant.whatsappPhone
+    .trim()
+    .toLocaleLowerCase("en-US");
+
+  if (!allowDuplicateContact && participantContactKey) {
+    const phoneWinner = rows.find(
+      (row) =>
+        row.value.whatsappPhone.trim().toLocaleLowerCase("en-US") ===
+        participantContactKey,
+    );
+
+    if (phoneWinner?.value.id !== participant.id) {
+      await clearParticipantRows([addedRow.rowIndex]);
       throw new PostRunEventsError(
         "CONFLICT",
         "This phone number was registered by another request first.",
       );
     }
+  }
 
+  if (
+    event.maxCapacity !== null &&
+    !rows.slice(0, event.maxCapacity).some(
+      (row) => row.value.id === participant.id,
+    )
+  ) {
+    await clearParticipantRows([addedRow.rowIndex]);
     throw new PostRunEventsError(
       "CAPACITY_REACHED",
       `"${event.title}" reached capacity while this participant was being added.`,
@@ -2155,6 +2164,18 @@ export async function getOrEnsureEventSheet(eventName: string): Promise<number> 
   return sheetId;
 }
 
+function eventTabPaymentStatus(participant: PostRunParticipant): string {
+  if (participant.settlementStatus === "Free") {
+    return "Free";
+  }
+
+  if (participant.settlementStatus === "Fully Cleared") {
+    return "Fully Cleared";
+  }
+
+  return participant.depositAmountPaidEgp > 0 ? "Deposit Paid" : "Unpaid";
+}
+
 async function syncParticipantToEventTab(
   event: PostRunEvent,
   participant: PostRunParticipant,
@@ -2170,9 +2191,7 @@ async function syncParticipantToEventTab(
     const rowValues = [
       participant.name,
       formattedPhone,
-      participant.settlementStatus === "Free"
-        ? "Free"
-        : participant.depositStatus,
+      eventTabPaymentStatus(participant),
       participant.depositAmountPaidEgp,
       participant.remainingBalanceEgp,
       participant.createdAt,
@@ -2223,6 +2242,7 @@ async function syncParticipantToEventTab(
 async function syncParticipantUpdateToEventTab(
   event: PostRunEvent,
   participant: PostRunParticipant,
+  previousParticipant: PostRunParticipant,
 ): Promise<void> {
   const tabName = sanitizeEventTabName(event.title);
 
@@ -2241,9 +2261,9 @@ async function syncParticipantUpdateToEventTab(
       const storedContact = String(row[1] ?? "").trim().replace(/^'/, "");
 
       return (
-        String(row[0] ?? "").trim() === participant.name &&
-        storedContact === participant.whatsappPhone &&
-        String(row[5] ?? "").trim() === participant.createdAt
+        String(row[0] ?? "").trim() === previousParticipant.name &&
+        storedContact === previousParticipant.whatsappPhone &&
+        String(row[5] ?? "").trim() === previousParticipant.createdAt
       );
     });
 
@@ -2255,13 +2275,13 @@ async function syncParticipantUpdateToEventTab(
     await withGoogleSheetsRetry(`update participant in ${tabName} tab`, () =>
       sheets.spreadsheets.values.update({
         spreadsheetId: GOOGLE_SPREADSHEET_ID,
-        range: `${quoteSheetName(tabName)}!C${rowNumber}:E${rowNumber}`,
+        range: `${quoteSheetName(tabName)}!A${rowNumber}:E${rowNumber}`,
         valueInputOption: "RAW",
         requestBody: {
           values: [[
-            participant.settlementStatus === "Free"
-              ? "Free"
-              : participant.depositStatus,
+            participant.name,
+            serializeParticipantContact(participant.whatsappPhone),
+            eventTabPaymentStatus(participant),
             participant.depositAmountPaidEgp,
             participant.remainingBalanceEgp,
           ]],
@@ -2844,6 +2864,7 @@ export async function addEventParticipant(
     }
 
     if (
+      !input.force &&
       whatsappPhone &&
       participants.some(
         (participant) =>
@@ -2933,7 +2954,12 @@ export async function addEventParticipant(
       },
     );
 
-    const reconciled = await reconcileParticipantAddition(event, participant, columns);
+    const reconciled = await reconcileParticipantAddition(
+      event,
+      participant,
+      columns,
+      input.force === true,
+    );
     await syncParticipantToEventTab(event, reconciled);
     return reconciled;
   });
@@ -2962,6 +2988,8 @@ export async function updateEventParticipant(
     }
 
     const patchKeys: readonly (keyof PostRunParticipantPatch)[] = [
+      "name",
+      "whatsappPhone",
       "depositStatus",
       "depositAmountPaidEgp",
       "paymentScreenshotUrl",
@@ -3014,6 +3042,8 @@ export async function updateEventParticipant(
     }
 
     const normalizedPatch: {
+      name?: string;
+      whatsappPhone?: string;
       depositStatus?: PostRunDepositStatus;
       depositAmountPaidEgp?: number;
       paymentScreenshotUrl?: string | null;
@@ -3022,6 +3052,20 @@ export async function updateEventParticipant(
       deletedAt?: string | null;
       deletedByAdminPhone?: string | null;
     } = {};
+
+    if (Object.prototype.hasOwnProperty.call(patch, "name")) {
+      normalizedPatch.name = requireBoundedText(
+        patch.name,
+        "Participant name",
+        MAX_NAME_LENGTH,
+      );
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "whatsappPhone")) {
+      normalizedPatch.whatsappPhone = normalizeParticipantContact(
+        patch.whatsappPhone,
+      );
+    }
 
     if (Object.prototype.hasOwnProperty.call(patch, "depositStatus")) {
       normalizedPatch.depositStatus = normalizeDepositStatus(
@@ -3131,7 +3175,11 @@ export async function updateEventParticipant(
       );
     }
 
-    await syncParticipantUpdateToEventTab(event, refreshed.value);
+    await syncParticipantUpdateToEventTab(
+      event,
+      refreshed.value,
+      currentRow.value,
+    );
     return refreshed.value;
   });
 }

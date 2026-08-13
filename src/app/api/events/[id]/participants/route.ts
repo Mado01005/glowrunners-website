@@ -6,6 +6,7 @@ import {
   isApiObject,
   POST_RUN_NO_STORE_HEADERS,
   postRunErrorResponse,
+  toParticipantPatch,
   toParticipantResponse,
   toFiniteNumber,
 } from "@/lib/postRunApi";
@@ -14,6 +15,7 @@ import {
   listEventParticipants,
   normalizeContactInput,
   PostRunEventsError,
+  updateEventParticipant,
   type PostRunParticipantInput,
 } from "@/lib/postRunEvents";
 
@@ -138,6 +140,7 @@ export async function POST(
         typeof (body.internalNotes ?? body.internal_notes) === "string"
           ? String(body.internalNotes ?? body.internal_notes)
           : "",
+      force: body.force === true,
     };
 
     const participant = await addEventParticipant(
@@ -183,5 +186,61 @@ export async function POST(
       },
       { status: 400, headers: POST_RUN_NO_STORE_HEADERS },
     );
+  }
+}
+
+export async function PATCH(
+  request: Request,
+  { params }: ParticipantsRouteContext,
+) {
+  const session = await getAdminSessionFromRequest(request);
+
+  if (!session) {
+    return forbiddenPostRunResponse();
+  }
+
+  const { id } = await params;
+  const body: unknown = await request.json().catch(() => null);
+
+  if (!isApiObject(body)) {
+    return NextResponse.json(
+      { success: false, error: "Participant changes must be a JSON object." },
+      { status: 400, headers: POST_RUN_NO_STORE_HEADERS },
+    );
+  }
+
+  const participantId =
+    typeof (body.participantId ?? body.participant_id) === "string"
+      ? String(body.participantId ?? body.participant_id)
+      : "";
+
+  if (!participantId.trim()) {
+    return NextResponse.json(
+      { success: false, error: "Participant ID is required." },
+      { status: 400, headers: POST_RUN_NO_STORE_HEADERS },
+    );
+  }
+
+  try {
+    const patch = toParticipantPatch(body);
+    const participant = await updateEventParticipant(
+      id,
+      participantId,
+      patch,
+      session.admin.phoneE164,
+    );
+    await recordAdminActivity(
+      session.admin,
+      "POST_RUN_PARTICIPANT_UPDATED",
+      `${session.admin.displayName} updated participant details for ${participant.name}`,
+      `post-run-update:${participant.id}:${participant.updatedAt}`,
+    );
+
+    return NextResponse.json(
+      { success: true, participant: toParticipantResponse(participant) },
+      { status: 200, headers: POST_RUN_NO_STORE_HEADERS },
+    );
+  } catch (error) {
+    return postRunErrorResponse(error, `/api/events/${id}/participants`);
   }
 }

@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { GoogleSheetsMutationOutcomeUnknownError } from "@/lib/googleSheets";
 import {
+  normalizeContactInput,
   PostRunEventsError,
   type PostRunEvent,
   type PostRunParticipant,
+  type PostRunParticipantPatch,
 } from "@/lib/postRunEvents";
 
 export const POST_RUN_NO_STORE_HEADERS = {
@@ -24,6 +26,119 @@ export function toFiniteNumber(value: unknown): number {
   }
 
   return Number.NaN;
+}
+
+function hasOwn(object: Record<string, unknown>, key: string) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+export function toParticipantPatch(
+  body: Record<string, unknown>,
+): PostRunParticipantPatch {
+  const patch: {
+    name?: string;
+    whatsappPhone?: string;
+    depositStatus?: PostRunParticipantPatch["depositStatus"];
+    depositAmountPaidEgp?: number;
+    paymentScreenshotUrl?: string | null;
+    settlementStatus?: PostRunParticipantPatch["settlementStatus"];
+    internalNotes?: string;
+  } = {};
+
+  if (hasOwn(body, "fullName") || hasOwn(body, "full_name")) {
+    const value = body.fullName ?? body.full_name;
+    patch.name = typeof value === "string" ? value : "";
+  }
+
+  if (
+    hasOwn(body, "phoneNumber") ||
+    hasOwn(body, "phone_number") ||
+    hasOwn(body, "whatsappPhone") ||
+    hasOwn(body, "whatsapp_phone") ||
+    hasOwn(body, "whatsapp") ||
+    hasOwn(body, "username")
+  ) {
+    const value =
+      body.phoneNumber ??
+      body.phone_number ??
+      body.whatsappPhone ??
+      body.whatsapp_phone ??
+      body.whatsapp ??
+      body.username ??
+      "";
+    patch.whatsappPhone = normalizeContactInput(
+      typeof value === "string" ? value : "",
+    );
+  }
+
+  if (hasOwn(body, "depositStatus") || hasOwn(body, "deposit_status")) {
+    const value = body.depositStatus ?? body.deposit_status;
+    patch.depositStatus =
+      value === "VERIFIED"
+        ? "Verified"
+        : value === "PENDING"
+          ? "Pending"
+          : (value as PostRunParticipantPatch["depositStatus"]);
+  }
+
+  if (
+    hasOwn(body, "amountPaid") ||
+    hasOwn(body, "amount_paid") ||
+    hasOwn(body, "depositPaid") ||
+    hasOwn(body, "deposit_paid")
+  ) {
+    patch.depositAmountPaidEgp = toFiniteNumber(
+      body.amountPaid ??
+        body.amount_paid ??
+        body.depositPaid ??
+        body.deposit_paid,
+    );
+  }
+
+  if (
+    hasOwn(body, "paymentProofUrl") ||
+    hasOwn(body, "payment_proof_url")
+  ) {
+    const value = body.paymentProofUrl ?? body.payment_proof_url;
+    patch.paymentScreenshotUrl =
+      value === null || value === "" ? null : String(value);
+  }
+
+  if (hasOwn(body, "internalNotes") || hasOwn(body, "internal_notes")) {
+    patch.internalNotes = String(
+      body.internalNotes ?? body.internal_notes ?? "",
+    );
+  }
+
+  if (
+    hasOwn(body, "settlementStatus") ||
+    hasOwn(body, "settlement_status") ||
+    hasOwn(body, "paymentStatus") ||
+    hasOwn(body, "payment_status")
+  ) {
+    const value =
+      body.paymentStatus ??
+      body.payment_status ??
+      body.settlementStatus ??
+      body.settlement_status;
+    const normalizedValue =
+      typeof value === "string" ? value.trim().toUpperCase() : value;
+    patch.settlementStatus =
+      normalizedValue === "FREE" || normalizedValue === "FREE ATTENDEE"
+        ? "Free"
+        : normalizedValue === "FULLY_CLEARED"
+          ? "Fully Cleared"
+          : normalizedValue === "UNPAID" ||
+              normalizedValue === "DEPOSIT_PAID"
+            ? "Unpaid"
+            : (value as PostRunParticipantPatch["settlementStatus"]);
+
+    if (patch.settlementStatus === "Free") {
+      patch.depositAmountPaidEgp = 0;
+    }
+  }
+
+  return patch;
 }
 
 export function toEventResponse(event: PostRunEvent) {

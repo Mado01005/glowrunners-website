@@ -68,6 +68,8 @@ type Participant = Readonly<{
 }>;
 
 type ParticipantPatch = Readonly<{
+  fullName?: string;
+  phoneNumber?: string;
   amountPaid?: number;
   paymentStatus?: PaymentStatus;
   paymentProofUrl?: string;
@@ -85,6 +87,18 @@ type EventFormState = {
   paymentInstructions: string;
 };
 
+type ParticipantFormState = {
+  fullName: string;
+  phoneNumber: string;
+  paymentStatus: PaymentStatus;
+};
+
+type DuplicateContactWarning = Readonly<{
+  existingParticipant: Participant;
+  candidate: ParticipantFormState;
+  normalizedContact: string;
+}>;
+
 const EMPTY_EVENT_FORM: EventFormState = {
   title: "",
   runDate: "",
@@ -94,7 +108,7 @@ const EMPTY_EVENT_FORM: EventFormState = {
   paymentInstructions: "",
 };
 
-const EMPTY_PARTICIPANT_FORM = {
+const EMPTY_PARTICIPANT_FORM: ParticipantFormState = {
   fullName: "",
   phoneNumber: "",
   paymentStatus: "UNPAID" as PaymentStatus,
@@ -136,6 +150,49 @@ function formatCompactMoney(value: number) {
 function safeNonNegativeNumber(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function normalizeContactForComparison(value: string) {
+  const trimmed = value.trim().replace(/^'/, "").trim();
+
+  if (!trimmed || trimmed === "-") {
+    return "";
+  }
+
+  const isHandle = trimmed.startsWith("@") || /[a-z._-]/i.test(trimmed);
+
+  if (isHandle) {
+    return (trimmed.startsWith("@") ? trimmed : `@${trimmed}`)
+      .toLocaleLowerCase("en-US");
+  }
+
+  const hasLeadingPlus = trimmed.startsWith("+");
+  const digitsOnly = trimmed.replace(/\D/g, "");
+
+  if (!digitsOnly) {
+    return "";
+  }
+
+  if (hasLeadingPlus) {
+    return `+${digitsOnly}`;
+  }
+
+  if (digitsOnly.startsWith("01") && digitsOnly.length === 11) {
+    return `+20${digitsOnly.slice(1)}`;
+  }
+
+  return digitsOnly.length >= 8 ? `+${digitsOnly}` : digitsOnly;
+}
+
+function formatDuplicateContact(value: string) {
+  const digits = value.replace(/\D/g, "");
+
+  if (digits.startsWith("20") && digits.length === 12) {
+    const local = digits.slice(2);
+    return `+20 ${local.slice(0, 3)} ${local.slice(3, 6)} ${local.slice(6)}`;
+  }
+
+  return value;
 }
 
 function formatEventDate(value: string) {
@@ -620,6 +677,8 @@ export function PostRunEventsDashboard() {
     EMPTY_PARTICIPANT_FORM,
   );
   const [selectedParticipantId, setSelectedParticipantId] = useState("");
+  const [participantNameDraft, setParticipantNameDraft] = useState("");
+  const [participantContactDraft, setParticipantContactDraft] = useState("");
   const [paymentDraft, setPaymentDraft] = useState("");
   const [paymentStatusDraft, setPaymentStatusDraft] =
     useState<PaymentStatus>("UNPAID");
@@ -630,6 +689,8 @@ export function PostRunEventsDashboard() {
   const [lightboxUrl, setLightboxUrl] = useState("");
   const [deleteEventCandidate, setDeleteEventCandidate] =
     useState<PostRunEvent | null>(null);
+  const [duplicateContactWarning, setDuplicateContactWarning] =
+    useState<DuplicateContactWarning | null>(null);
   const [busyKey, setBusyKey] = useState("");
   const [isLoadingEvents, setIsLoadingEvents] = useState(true);
   const [isLoadingParticipants, setIsLoadingParticipants] = useState(false);
@@ -1216,8 +1277,13 @@ export function PostRunEventsDashboard() {
     }
   };
 
-  const addParticipant = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const handleAddParticipant = async ({
+    candidate,
+    force,
+  }: {
+    candidate: ParticipantFormState;
+    force: boolean;
+  }) => {
     setEventsServiceError(null);
     setEventsConnectionMessage(null);
 
@@ -1238,7 +1304,7 @@ export function PostRunEventsDashboard() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(participantForm),
+          body: JSON.stringify({ ...candidate, force }),
         },
       );
 
@@ -1255,6 +1321,7 @@ export function PostRunEventsDashboard() {
       const created = payload.participant as Participant;
       setParticipants((current) => [...current, created]);
       setParticipantForm(EMPTY_PARTICIPANT_FORM);
+      setDuplicateContactWarning(null);
       setNotice({
         tone: "success",
         message: `${created.fullName} was added.`,
@@ -1271,6 +1338,34 @@ export function PostRunEventsDashboard() {
       activeOperationRef.current = false;
       setBusyKey("");
     }
+  };
+
+  const addParticipant = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalizedContact = normalizeContactForComparison(
+      participantForm.phoneNumber,
+    );
+    const existingParticipant = normalizedContact
+      ? participants.find(
+          (participant) =>
+            normalizeContactForComparison(participant.phoneNumber) ===
+            normalizedContact,
+        )
+      : undefined;
+
+    if (existingParticipant) {
+      setDuplicateContactWarning({
+        existingParticipant,
+        candidate: { ...participantForm },
+        normalizedContact,
+      });
+      return;
+    }
+
+    void handleAddParticipant({
+      candidate: { ...participantForm },
+      force: false,
+    });
   };
 
   const updateParticipant = useCallback(
@@ -1304,7 +1399,8 @@ export function PostRunEventsDashboard() {
       );
       const optimistic: Participant = {
         ...participant,
-        ...patch,
+        fullName: patch.fullName ?? participant.fullName,
+        phoneNumber: patch.phoneNumber ?? participant.phoneNumber,
         paymentStatus: nextStatus,
         amountPaid: nextAmount,
         depositPaid: nextAmount,
@@ -1327,13 +1423,11 @@ export function PostRunEventsDashboard() {
 
       try {
         const { response, payload } = await apiRequest(
-          `/api/events/${encodeURIComponent(
-            selectedEvent.id,
-          )}/participants/${encodeURIComponent(participant.id)}`,
+          `/api/events/${encodeURIComponent(selectedEvent.id)}/participants`,
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(patch),
+            body: JSON.stringify({ participantId: participant.id, ...patch }),
           },
         );
 
@@ -1514,6 +1608,8 @@ export function PostRunEventsDashboard() {
 
   const openParticipant = (participant: Participant) => {
     setSelectedParticipantId(participant.id);
+    setParticipantNameDraft(participant.fullName);
+    setParticipantContactDraft(participant.phoneNumber);
     setPaymentDraft(String(participant.amountPaid));
     setPaymentStatusDraft(participant.paymentStatus);
     setNotesDraft(participant.internalNotes ?? "");
@@ -2021,13 +2117,13 @@ export function PostRunEventsDashboard() {
                         <article
                           key={participant.id}
                           data-testid="compact-participant-row"
-                          className="grid h-[50px] min-w-0 grid-cols-[minmax(0,1fr)_72px] border-b border-zinc-800 bg-zinc-950 last:border-b-0"
+                          className="grid min-h-[104px] min-w-0 grid-cols-[minmax(0,1fr)_88px] border-b border-zinc-800 bg-zinc-950 last:border-b-0"
                         >
                           <button
                             type="button"
                             onClick={() => openParticipant(participant)}
                             className="grid h-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 px-2 text-left outline-none focus:bg-zinc-900"
-                            aria-label={`Open ${participant.fullName} payment details`}
+                            aria-label={`Open ${participant.fullName} participant details`}
                           >
                             <span className="min-w-0">
                               <span className="block truncate text-[11px] font-black leading-tight">
@@ -2035,6 +2131,11 @@ export function PostRunEventsDashboard() {
                               </span>
                               <span className="block truncate text-[9px] font-bold tabular-nums text-zinc-500">
                                 {participant.phoneNumber || "No contact provided"}
+                              </span>
+                              <span className="mt-1 block truncate text-[9px] font-black tabular-nums text-amber-300">
+                                {isCleared
+                                  ? "0 EGP owed"
+                                  : `${formatCompactMoney(state.remaining)} EGP owed`}
                               </span>
                             </span>
                             <span
@@ -2051,12 +2152,15 @@ export function PostRunEventsDashboard() {
                               {state.label}
                             </span>
                           </button>
-                          <div className="flex h-full min-w-0 flex-col items-stretch justify-center gap-0.5 border-l border-zinc-800 px-1">
-                            <span className="truncate text-center text-[8px] font-black tabular-nums text-amber-300">
-                              {isCleared
-                                ? "0 owed"
-                                : `${formatCompactMoney(state.remaining)} owed`}
-                            </span>
+                          <div className="flex h-full min-w-0 flex-col items-stretch justify-center gap-2 border-l border-zinc-800 p-1.5">
+                            <button
+                              type="button"
+                              disabled={isSelectedEventArchived || isAnyBusy}
+                              onClick={() => openParticipant(participant)}
+                              className="min-h-11 rounded-md border border-sky-800 bg-sky-950 px-1 text-[10px] font-black text-sky-200 disabled:border-zinc-800 disabled:text-zinc-600"
+                            >
+                              ✏️ Edit
+                            </button>
                             <button
                               type="button"
                               disabled={
@@ -2066,7 +2170,7 @@ export function PostRunEventsDashboard() {
                                 isAnyBusy
                               }
                               onClick={() => void clearParticipant(participant)}
-                            className="min-h-7 rounded-md bg-emerald-400 px-1 text-[9px] font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
+                            className="min-h-11 rounded-md bg-emerald-400 px-1 text-[10px] font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
                           >
                               {isBusy ? "…" : isCleared ? "✓" : "Clear"}
                           </button>
@@ -2177,9 +2281,62 @@ export function PostRunEventsDashboard() {
         </ModalShell>
       ) : null}
 
+      {duplicateContactWarning ? (
+        <ModalShell
+          title="Duplicate Contact Warning"
+          onClose={() => setDuplicateContactWarning(null)}
+        >
+          <div className="mt-4 flex min-w-0 flex-col gap-4">
+            <p className="break-words rounded-xl border border-amber-800 bg-amber-950/30 p-3 text-sm font-semibold leading-6 text-amber-100">
+              ⚠️ Warning: The contact number{` `}
+              <strong className="text-white">
+                {formatDuplicateContact(
+                  duplicateContactWarning.normalizedContact,
+                )}
+              </strong>{` `}
+              is already registered under{` `}
+              <strong className="text-white">
+                {duplicateContactWarning.existingParticipant.fullName}
+              </strong>
+              . Do you want to add{` `}
+              <strong className="text-white">
+                {duplicateContactWarning.candidate.fullName}
+              </strong>{` `}
+              with the same contact number anyway?
+            </p>
+            <div className="grid min-w-0 grid-cols-2 gap-2">
+              <button
+                type="button"
+                data-modal-autofocus
+                disabled={busyKey === "add-participant"}
+                onClick={() => setDuplicateContactWarning(null)}
+                className="min-h-12 min-w-0 rounded-xl border border-zinc-700 px-3 text-sm font-black disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busyKey === "add-participant"}
+                onClick={() => {
+                  const warning = duplicateContactWarning;
+                  setDuplicateContactWarning(null);
+                  void handleAddParticipant({
+                    candidate: warning.candidate,
+                    force: true,
+                  });
+                }}
+                className="min-h-12 min-w-0 rounded-xl bg-amber-400 px-3 text-sm font-black text-black disabled:opacity-50"
+              >
+                Add Anyway
+              </button>
+            </div>
+          </div>
+        </ModalShell>
+      ) : null}
+
       {selectedParticipant && selectedEvent ? (
         <ModalShell
-          title={selectedParticipant.fullName}
+          title={`Edit Participant · ${selectedParticipant.fullName}`}
           onClose={() => setSelectedParticipantId("")}
         >
           {(() => {
@@ -2260,19 +2417,51 @@ export function PostRunEventsDashboard() {
                       void updateParticipant(
                         selectedParticipant,
                         {
+                          fullName: participantNameDraft,
+                          phoneNumber: participantContactDraft,
                           amountPaid,
                           paymentStatus: paymentStatusDraft,
                         },
-                        "payment",
+                        "edit",
                       ).then((updated) => {
                         if (updated) {
+                          setParticipantNameDraft(updated.fullName);
+                          setParticipantContactDraft(updated.phoneNumber);
                           setPaymentDraft(String(updated.amountPaid));
                           setPaymentStatusDraft(updated.paymentStatus);
+                          setSelectedParticipantId("");
                         }
                       });
                     }}
-                    className="rounded-xl border border-zinc-800 bg-black p-3"
+                    className="flex min-w-0 flex-col gap-3 rounded-xl border border-zinc-800 bg-black p-3"
                   >
+                  <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                    Name
+                    <input
+                      type="text"
+                      required
+                      maxLength={120}
+                      autoComplete="name"
+                      value={participantNameDraft}
+                      onChange={(event) =>
+                        setParticipantNameDraft(event.target.value)
+                      }
+                      className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                    />
+                  </label>
+                  <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                    WhatsApp phone or @username
+                    <input
+                      type="text"
+                      maxLength={80}
+                      autoComplete="off"
+                      value={participantContactDraft}
+                      onChange={(event) =>
+                        setParticipantContactDraft(event.target.value)
+                      }
+                      className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                    />
+                  </label>
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
                     Payment status
                     <select
@@ -2316,9 +2505,9 @@ export function PostRunEventsDashboard() {
                       disabled={isAnyBusy}
                       className="min-h-12 rounded-xl bg-white px-3 text-xs font-black text-black disabled:opacity-50"
                     >
-                      {busyKey === `payment:${selectedParticipant.id}`
-                        ? "Updating…"
-                        : "Update Payment"}
+                      {busyKey === `edit:${selectedParticipant.id}`
+                        ? "Saving…"
+                        : "Save Participant"}
                     </button>
                     <button
                       type="button"
