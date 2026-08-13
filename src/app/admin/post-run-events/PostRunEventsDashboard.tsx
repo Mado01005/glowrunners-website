@@ -10,7 +10,10 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type DragEvent,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 
@@ -691,6 +694,7 @@ export function PostRunEventsDashboard() {
     useState<PostRunEvent | null>(null);
   const [duplicateContactWarning, setDuplicateContactWarning] =
     useState<DuplicateContactWarning | null>(null);
+  const [draggingParticipantId, setDraggingParticipantId] = useState("");
   const [busyKey, setBusyKey] = useState("");
   const [isLoadingEvents, setIsLoadingEvents] = useState(true);
   const [isLoadingParticipants, setIsLoadingParticipants] = useState(false);
@@ -710,6 +714,7 @@ export function PostRunEventsDashboard() {
   const participantsRequestIdRef = useRef(0);
   const activeDateRequestIdRef = useRef(0);
   const activeOperationRef = useRef(false);
+  const touchReorderIdRef = useRef("");
 
   const selectedEvent =
     events.find((event) => event.id === selectedEventId) ?? null;
@@ -1615,6 +1620,109 @@ export function PostRunEventsDashboard() {
     setNotesDraft(participant.internalNotes ?? "");
   };
 
+  const reorderParticipant = useCallback(
+    (
+      participantId: string,
+      targetParticipantId: string,
+      placement: "before" | "after",
+    ) => {
+      if (!participantId || participantId === targetParticipantId) {
+        return;
+      }
+
+      setParticipants((current) => {
+        const sourceIndex = current.findIndex(
+          (participant) => participant.id === participantId,
+        );
+        const targetIndex = current.findIndex(
+          (participant) => participant.id === targetParticipantId,
+        );
+
+        if (sourceIndex < 0 || targetIndex < 0) {
+          return current;
+        }
+
+        const reordered = [...current];
+        const [movedParticipant] = reordered.splice(sourceIndex, 1);
+        const adjustedTargetIndex = reordered.findIndex(
+          (participant) => participant.id === targetParticipantId,
+        );
+        const insertionIndex =
+          adjustedTargetIndex + (placement === "after" ? 1 : 0);
+        reordered.splice(insertionIndex, 0, movedParticipant);
+
+        return reordered.every(
+          (participant, index) => participant.id === current[index]?.id,
+        )
+          ? current
+          : reordered;
+      });
+    },
+    [],
+  );
+
+  const moveParticipantByOffset = useCallback(
+    (participantId: string, offset: -1 | 1) => {
+      const visibleIndex = visibleParticipants.findIndex(
+        (participant) => participant.id === participantId,
+      );
+      const targetParticipant = visibleParticipants[visibleIndex + offset];
+
+      if (visibleIndex < 0 || !targetParticipant) {
+        return;
+      }
+
+      reorderParticipant(
+        participantId,
+        targetParticipant.id,
+        offset < 0 ? "before" : "after",
+      );
+    },
+    [reorderParticipant, visibleParticipants],
+  );
+
+  const handleTouchReorderMove = (
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    const participantId = touchReorderIdRef.current;
+
+    if (!participantId || event.pointerType === "mouse") {
+      return;
+    }
+
+    event.preventDefault();
+    const targetCard = document
+      .elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>("[data-participant-id]");
+    const targetParticipantId = targetCard?.dataset.participantId;
+
+    if (!targetCard || !targetParticipantId) {
+      return;
+    }
+
+    const targetBounds = targetCard.getBoundingClientRect();
+    reorderParticipant(
+      participantId,
+      targetParticipantId,
+      event.clientY >= targetBounds.top + targetBounds.height / 2
+        ? "after"
+        : "before",
+    );
+  };
+
+  const finishTouchReorder = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === "mouse") {
+      return;
+    }
+
+    touchReorderIdRef.current = "";
+    setDraggingParticipantId("");
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
   const copySummary = async () => {
     if (!selectedEvent) {
       return;
@@ -1622,10 +1730,10 @@ export function PostRunEventsDashboard() {
 
     const reportMoney = (value: number) =>
       safeNonNegativeNumber(value).toLocaleString("en-US");
-    const participantRoster = participants.map((participant) => {
+    const participantRoster = participants.map((participant, index) => {
       const state = paymentState(participant, selectedEvent);
       const contact = participant.phoneNumber.trim() || "No contact";
-      const participantLabel = `• ${participant.fullName} (${contact})`;
+      const participantLabel = `${index + 1}. ${participant.fullName} (${contact})`;
 
       if (state.kind === "free") {
         return `${participantLabel} – 🎁 Free Attendee`;
@@ -2146,9 +2254,93 @@ export function PostRunEventsDashboard() {
                       return (
                         <article
                           key={participant.id}
+                          data-participant-id={participant.id}
                           data-testid="compact-participant-row"
-                          className="grid min-h-16 min-w-0 grid-cols-[minmax(0,1fr)_76px] border-b border-zinc-800 bg-zinc-950 last:border-b-0"
+                          onDragOver={(event) => {
+                            if (draggingParticipantId) {
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = "move";
+                            }
+                          }}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            const participantId =
+                              event.dataTransfer.getData("text/plain") ||
+                              draggingParticipantId;
+                            const targetBounds =
+                              event.currentTarget.getBoundingClientRect();
+                            reorderParticipant(
+                              participantId,
+                              participant.id,
+                              event.clientY >=
+                                targetBounds.top + targetBounds.height / 2
+                                ? "after"
+                                : "before",
+                            );
+                            setDraggingParticipantId("");
+                          }}
+                          className={`grid min-h-16 min-w-0 grid-cols-[44px_minmax(0,1fr)_76px] border-b border-zinc-800 last:border-b-0 ${
+                            draggingParticipantId === participant.id
+                              ? "bg-zinc-900 opacity-70"
+                              : "bg-zinc-950"
+                          }`}
                         >
+                          <button
+                            type="button"
+                            draggable
+                            aria-label={`Reorder ${participant.fullName}. Use drag or the up and down arrow keys.`}
+                            title={`Reorder ${participant.fullName}`}
+                            onClick={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => {
+                              event.stopPropagation();
+
+                              if (event.pointerType === "mouse") {
+                                return;
+                              }
+
+                              touchReorderIdRef.current = participant.id;
+                              setDraggingParticipantId(participant.id);
+                              event.currentTarget.setPointerCapture(
+                                event.pointerId,
+                              );
+                            }}
+                            onPointerMove={handleTouchReorderMove}
+                            onPointerUp={finishTouchReorder}
+                            onPointerCancel={finishTouchReorder}
+                            onDragStart={(
+                              event: DragEvent<HTMLButtonElement>,
+                            ) => {
+                              event.stopPropagation();
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData(
+                                "text/plain",
+                                participant.id,
+                              );
+                              setDraggingParticipantId(participant.id);
+                            }}
+                            onDragEnd={() => setDraggingParticipantId("")}
+                            onKeyDown={(
+                              event: ReactKeyboardEvent<HTMLButtonElement>,
+                            ) => {
+                              if (
+                                event.key !== "ArrowUp" &&
+                                event.key !== "ArrowDown"
+                              ) {
+                                return;
+                              }
+
+                              event.preventDefault();
+                              event.stopPropagation();
+                              moveParticipantByOffset(
+                                participant.id,
+                                event.key === "ArrowUp" ? -1 : 1,
+                              );
+                            }}
+                            className="flex min-h-11 w-11 touch-none cursor-grab select-none items-center justify-center border-r border-zinc-800 text-sm font-black tracking-[-0.2em] text-zinc-500 outline-none active:cursor-grabbing focus:bg-zinc-900 focus:text-white"
+                          >
+                            ⋮⋮
+                          </button>
                           <button
                             type="button"
                             onClick={() => handleOpenEditModal(participant)}
