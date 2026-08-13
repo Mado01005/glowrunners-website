@@ -68,6 +68,14 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     amountPaid: participant.depositAmountPaidEgp,
     paymentProofUrl,
     remainingBalance: participant.remainingBalanceEgp,
+    paymentStatus:
+      participant.settlementStatus === "Free"
+        ? "FREE"
+        : participant.settlementStatus === "Fully Cleared"
+          ? "FULLY_CLEARED"
+          : participant.depositAmountPaidEgp > 0
+            ? "DEPOSIT_PAID"
+            : "UNPAID",
     settlementStatus:
       participant.settlementStatus === "Fully Cleared"
         ? "FULLY_CLEARED"

@@ -89,6 +89,16 @@ export async function POST(
     const normalizedContact = normalizeContactInput(
       typeof rawContact === "string" ? rawContact : "",
     );
+    const isFree = [
+      body.paymentStatus,
+      body.payment_status,
+      body.settlementStatus,
+      body.settlement_status,
+    ].some((value) =>
+      ["FREE", "FREE ATTENDEE"].includes(
+        typeof value === "string" ? value.trim().toUpperCase() : "",
+      ),
+    );
 
     const input: PostRunParticipantInput = {
       name:
@@ -101,8 +111,9 @@ export async function POST(
         body.deposit_status === "VERIFIED"
           ? "Verified"
           : "Pending",
-      depositAmountPaidEgp:
-        body.amountPaid === undefined &&
+      depositAmountPaidEgp: isFree
+        ? 0
+        : body.amountPaid === undefined &&
         body.amount_paid === undefined &&
         body.depositPaid === undefined &&
         body.deposit_paid === undefined
@@ -117,8 +128,9 @@ export async function POST(
         typeof (body.paymentProofUrl ?? body.payment_proof_url) === "string"
           ? String(body.paymentProofUrl ?? body.payment_proof_url)
           : null,
-      settlementStatus:
-        body.settlementStatus === "FULLY_CLEARED" ||
+      settlementStatus: isFree
+        ? "Free"
+        : body.settlementStatus === "FULLY_CLEARED" ||
         body.settlement_status === "FULLY_CLEARED"
           ? "Fully Cleared"
           : "Unpaid",

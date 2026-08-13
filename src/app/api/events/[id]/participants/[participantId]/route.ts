@@ -95,15 +95,30 @@ export async function PATCH(
 
   if (
     hasOwn(body, "settlementStatus") ||
-    hasOwn(body, "settlement_status")
+    hasOwn(body, "settlement_status") ||
+    hasOwn(body, "paymentStatus") ||
+    hasOwn(body, "payment_status")
   ) {
-    const value = body.settlementStatus ?? body.settlement_status;
+    const value =
+      body.paymentStatus ??
+      body.payment_status ??
+      body.settlementStatus ??
+      body.settlement_status;
+    const normalizedValue =
+      typeof value === "string" ? value.trim().toUpperCase() : value;
     patch.settlementStatus =
-      value === "FULLY_CLEARED"
-        ? "Fully Cleared"
-        : value === "UNPAID"
-          ? "Unpaid"
-          : (value as PostRunParticipantPatch["settlementStatus"]);
+      normalizedValue === "FREE" || normalizedValue === "FREE ATTENDEE"
+        ? "Free"
+        : normalizedValue === "FULLY_CLEARED"
+          ? "Fully Cleared"
+          : normalizedValue === "UNPAID" ||
+              normalizedValue === "DEPOSIT_PAID"
+            ? "Unpaid"
+            : (value as PostRunParticipantPatch["settlementStatus"]);
+
+    if (patch.settlementStatus === "Free") {
+      patch.depositAmountPaidEgp = 0;
+    }
   }
 
   try {

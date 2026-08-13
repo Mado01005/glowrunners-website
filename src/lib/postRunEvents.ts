@@ -27,6 +27,7 @@ export const POST_RUN_DEPOSIT_STATUSES = ["Pending", "Verified"] as const;
 export const POST_RUN_SETTLEMENT_STATUSES = [
   "Unpaid",
   "Fully Cleared",
+  "Free",
 ] as const;
 
 export type PostRunDepositStatus =
@@ -815,6 +816,10 @@ function normalizeSettlementStatus(
     return "Fully Cleared";
   }
 
+  if (normalized === "free" || normalized === "free attendee") {
+    return "Free";
+  }
+
   throw new PostRunEventsError(
     errorKind,
     `Settlement status must be one of: ${POST_RUN_SETTLEMENT_STATUSES.join(
@@ -890,27 +895,49 @@ export function computePostRunRemainingBalance(
   totalCostPerPersonEgp: number,
   depositAmountPaidEgp: number,
 ): number {
+  const safeTicketPrice = Number.isFinite(totalCostPerPersonEgp)
+    ? Math.max(0, totalCostPerPersonEgp)
+    : 0;
+  const safeAmountPaid = Number.isFinite(depositAmountPaidEgp)
+    ? Math.max(0, depositAmountPaidEgp)
+    : 0;
+
   return Math.max(
     0,
-    Math.round((totalCostPerPersonEgp - depositAmountPaidEgp) * 100) / 100,
+    Math.round((safeTicketPrice - safeAmountPaid) * 100) / 100,
   );
 }
 
 export function derivePostRunPaymentStatuses(
   amountPaidEgp: number,
   eventTicketPriceEgp: number,
+  requestedSettlementStatus?: PostRunSettlementStatus,
 ): {
   depositStatus: PostRunDepositStatus;
   settlementStatus: PostRunSettlementStatus;
 } {
-  if (amountPaidEgp <= 0) {
+  if (requestedSettlementStatus === "Free") {
+    return {
+      depositStatus: "Pending",
+      settlementStatus: "Free",
+    };
+  }
+
+  const safeAmountPaid = Number.isFinite(amountPaidEgp)
+    ? Math.max(0, amountPaidEgp)
+    : 0;
+  const safeTicketPrice = Number.isFinite(eventTicketPriceEgp)
+    ? Math.max(0, eventTicketPriceEgp)
+    : 0;
+
+  if (safeAmountPaid <= 0) {
     return {
       depositStatus: "Pending",
       settlementStatus: "Unpaid",
     };
   }
 
-  if (amountPaidEgp >= eventTicketPriceEgp) {
+  if (safeAmountPaid >= safeTicketPrice) {
     return {
       depositStatus: "Verified",
       settlementStatus: "Fully Cleared",
@@ -1417,34 +1444,41 @@ function parseParticipantRow(
   columns: ColumnMap<ParticipantColumn>,
   event: PostRunEvent,
 ): PostRunParticipant {
-  const depositAmountPaidEgp = normalizeMoney(
-    getCell(row, columns, "depositAmountPaidEgp"),
-    "Deposit amount paid",
-    "CONFIGURATION",
-  );
-
   const requestedSettlementStatus = normalizeSettlementStatus(
     getCell(row, columns, "settlementStatus"),
     "CONFIGURATION",
   );
-  const effectiveAmountPaidEgp =
-    requestedSettlementStatus === "Fully Cleared" &&
-    depositAmountPaidEgp < event.totalCostPerPersonEgp
+  const depositAmountPaidEgp = requestedSettlementStatus === "Free"
+    ? 0
+    : normalizeMoney(
+        getCell(row, columns, "depositAmountPaidEgp"),
+        "Deposit amount paid",
+        "CONFIGURATION",
+      );
+  const effectiveAmountPaidEgp = requestedSettlementStatus === "Free"
+    ? 0
+    : requestedSettlementStatus === "Fully Cleared" &&
+        depositAmountPaidEgp < event.totalCostPerPersonEgp
       ? event.totalCostPerPersonEgp
       : depositAmountPaidEgp;
-  const remainingBalanceEgp = computePostRunRemainingBalance(
-    event.totalCostPerPersonEgp,
-    effectiveAmountPaidEgp,
-  );
+  const remainingBalanceEgp = requestedSettlementStatus === "Free"
+    ? 0
+    : computePostRunRemainingBalance(
+        event.totalCostPerPersonEgp,
+        effectiveAmountPaidEgp,
+      );
   const { depositStatus, settlementStatus } = derivePostRunPaymentStatuses(
     effectiveAmountPaidEgp,
     event.totalCostPerPersonEgp,
+    requestedSettlementStatus,
   );
-  const storedRemainingBalance = normalizeMoney(
-    getCell(row, columns, "remainingBalanceEgp"),
-    "Remaining balance",
-    "CONFIGURATION",
-  );
+  const storedRemainingBalance = requestedSettlementStatus === "Free"
+    ? 0
+    : normalizeMoney(
+        getCell(row, columns, "remainingBalanceEgp"),
+        "Remaining balance",
+        "CONFIGURATION",
+      );
 
   if (Math.abs(storedRemainingBalance - remainingBalanceEgp) >= 0.01) {
     console.warn(
@@ -1679,18 +1713,27 @@ function applyParticipantUpdate(
 ): PostRunParticipant {
   const patchedAmountPaidEgp =
     update.patch.depositAmountPaidEgp ?? current.depositAmountPaidEgp;
-  const depositAmountPaidEgp =
-    update.patch.settlementStatus === "Fully Cleared" &&
-    update.patch.depositAmountPaidEgp === undefined
+  const requestedSettlementStatus =
+    update.patch.settlementStatus ??
+    (update.patch.depositAmountPaidEgp === undefined
+      ? current.settlementStatus
+      : undefined);
+  const depositAmountPaidEgp = requestedSettlementStatus === "Free"
+    ? 0
+    : update.patch.settlementStatus === "Fully Cleared" &&
+        update.patch.depositAmountPaidEgp === undefined
       ? Math.max(patchedAmountPaidEgp, event.totalCostPerPersonEgp)
       : patchedAmountPaidEgp;
-  const remainingBalanceEgp = computePostRunRemainingBalance(
-    event.totalCostPerPersonEgp,
-    depositAmountPaidEgp,
-  );
+  const remainingBalanceEgp = requestedSettlementStatus === "Free"
+    ? 0
+    : computePostRunRemainingBalance(
+        event.totalCostPerPersonEgp,
+        depositAmountPaidEgp,
+      );
   const { depositStatus, settlementStatus } = derivePostRunPaymentStatuses(
     depositAmountPaidEgp,
     event.totalCostPerPersonEgp,
+    requestedSettlementStatus,
   );
 
   return {
@@ -2127,7 +2170,9 @@ async function syncParticipantToEventTab(
     const rowValues = [
       participant.name,
       formattedPhone,
-      participant.depositStatus,
+      participant.settlementStatus === "Free"
+        ? "Free"
+        : participant.depositStatus,
       participant.depositAmountPaidEgp,
       participant.remainingBalanceEgp,
       participant.createdAt,
@@ -2169,6 +2214,65 @@ async function syncParticipantToEventTab(
       JSON.stringify({
         level: "warn",
         message: `Failed to sync participant to event tab "${tabName}". Master ledger recording succeeded.`,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
+async function syncParticipantUpdateToEventTab(
+  event: PostRunEvent,
+  participant: PostRunParticipant,
+): Promise<void> {
+  const tabName = sanitizeEventTabName(event.title);
+
+  try {
+    const sheets = await getSheetsClient();
+    const rowsResponse = await withGoogleSheetsRetry(
+      `find participant in ${tabName} tab`,
+      () =>
+        sheets.spreadsheets.values.get({
+          spreadsheetId: GOOGLE_SPREADSHEET_ID,
+          range: `${quoteSheetName(tabName)}!A2:F`,
+        }),
+    );
+    const rows = rowsResponse.data.values ?? [];
+    const rowOffset = rows.findIndex((row) => {
+      const storedContact = String(row[1] ?? "").trim().replace(/^'/, "");
+
+      return (
+        String(row[0] ?? "").trim() === participant.name &&
+        storedContact === participant.whatsappPhone &&
+        String(row[5] ?? "").trim() === participant.createdAt
+      );
+    });
+
+    if (rowOffset < 0) {
+      return;
+    }
+
+    const rowNumber = rowOffset + 2;
+    await withGoogleSheetsRetry(`update participant in ${tabName} tab`, () =>
+      sheets.spreadsheets.values.update({
+        spreadsheetId: GOOGLE_SPREADSHEET_ID,
+        range: `${quoteSheetName(tabName)}!C${rowNumber}:E${rowNumber}`,
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [[
+            participant.settlementStatus === "Free"
+              ? "Free"
+              : participant.depositStatus,
+            participant.depositAmountPaidEgp,
+            participant.remainingBalanceEgp,
+          ]],
+        },
+      }),
+    );
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        message: `Failed to update participant in event tab "${tabName}". Master ledger recording succeeded.`,
         error: error instanceof Error ? error.message : String(error),
       }),
     );
@@ -2753,20 +2857,30 @@ export async function addEventParticipant(
       );
     }
 
-    const depositAmountPaidEgp =
+    const requestedSettlementStatus =
+      input.settlementStatus === undefined
+        ? undefined
+        : normalizeSettlementStatus(input.settlementStatus);
+    const submittedAmountPaidEgp =
       input.depositAmountPaidEgp === undefined
         ? 0
         : normalizeMoney(
             input.depositAmountPaidEgp,
             "Deposit amount paid",
           );
-    const remainingBalanceEgp = computePostRunRemainingBalance(
-      event.totalCostPerPersonEgp,
-      depositAmountPaidEgp,
-    );
+    const depositAmountPaidEgp = requestedSettlementStatus === "Free"
+      ? 0
+      : submittedAmountPaidEgp;
+    const remainingBalanceEgp = requestedSettlementStatus === "Free"
+      ? 0
+      : computePostRunRemainingBalance(
+          event.totalCostPerPersonEgp,
+          depositAmountPaidEgp,
+        );
     const { depositStatus, settlementStatus } = derivePostRunPaymentStatuses(
       depositAmountPaidEgp,
       event.totalCostPerPersonEgp,
+      requestedSettlementStatus,
     );
     const paymentScreenshotUrl = normalizeScreenshotUrl(
       input.paymentScreenshotUrl,
@@ -3017,6 +3131,7 @@ export async function updateEventParticipant(
       );
     }
 
+    await syncParticipantUpdateToEventTab(event, refreshed.value);
     return refreshed.value;
   });
 }

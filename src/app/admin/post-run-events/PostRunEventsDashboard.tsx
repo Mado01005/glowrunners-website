@@ -16,7 +16,12 @@ import {
 
 type DepositStatus = "PENDING" | "VERIFIED";
 type SettlementStatus = "UNPAID" | "FULLY_CLEARED";
-type PaymentFilter = "all" | "unpaid" | "deposit" | "cleared";
+type PaymentStatus =
+  | "UNPAID"
+  | "DEPOSIT_PAID"
+  | "FULLY_CLEARED"
+  | "FREE";
+type PaymentFilter = "all" | "unpaid" | "deposit" | "cleared" | "free";
 type EventModal = "create" | "edit" | null;
 
 type ActiveAdmin = Readonly<{
@@ -54,6 +59,7 @@ type Participant = Readonly<{
   amountPaid: number;
   paymentProofUrl: string;
   remainingBalance: number;
+  paymentStatus: PaymentStatus;
   settlementStatus: SettlementStatus;
   updatedByAdmin: string;
   internalNotes: string;
@@ -63,6 +69,7 @@ type Participant = Readonly<{
 
 type ParticipantPatch = Readonly<{
   amountPaid?: number;
+  paymentStatus?: PaymentStatus;
   paymentProofUrl?: string;
   internalNotes?: string;
 }>;
@@ -90,6 +97,7 @@ const EMPTY_EVENT_FORM: EventFormState = {
 const EMPTY_PARTICIPANT_FORM = {
   fullName: "",
   phoneNumber: "",
+  paymentStatus: "UNPAID" as PaymentStatus,
 };
 
 const SESSION_STORAGE_KEY = "glowrunners.admin.identity.v1";
@@ -123,6 +131,11 @@ function formatMoney(value: number) {
 function formatCompactMoney(value: number) {
   const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
   return MONEY_FORMATTER.format(safeValue);
+}
+
+function safeNonNegativeNumber(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
 }
 
 function formatEventDate(value: string) {
@@ -169,6 +182,20 @@ function whatsappLink(phone: string, message: string) {
 }
 
 function paymentState(participant: Participant, event: PostRunEvent) {
+  const normalizedStatus = String(participant.paymentStatus ?? "")
+    .trim()
+    .toUpperCase();
+
+  if (normalizedStatus === "FREE" || normalizedStatus === "FREE ATTENDEE") {
+    return {
+      kind: "free" as const,
+      amountPaid: 0,
+      remaining: 0,
+      label: "🎁 Free",
+      longLabel: "Free Attendee",
+    };
+  }
+
   const amountPaid = Number.isFinite(participant.amountPaid)
     ? Math.max(0, participant.amountPaid)
     : 0;
@@ -594,6 +621,8 @@ export function PostRunEventsDashboard() {
   );
   const [selectedParticipantId, setSelectedParticipantId] = useState("");
   const [paymentDraft, setPaymentDraft] = useState("");
+  const [paymentStatusDraft, setPaymentStatusDraft] =
+    useState<PaymentStatus>("UNPAID");
   const [notesDraft, setNotesDraft] = useState("");
   const [paymentFilter, setPaymentFilter] =
     useState<PaymentFilter>("all");
@@ -791,23 +820,39 @@ export function PostRunEventsDashboard() {
 
   const totals = useMemo(() => {
     if (!selectedEvent) {
-      return { expected: 0, collected: 0, remaining: 0 };
+      return {
+        totalRegistered: 0,
+        freeCount: 0,
+        payingCount: 0,
+        expected: 0,
+        collected: 0,
+        remaining: 0,
+      };
     }
 
-    const expected = selectedEvent.totalCost * participants.length;
+    const totalRegistered = participants.length;
+    const freeCount = participants.filter(
+      (participant) =>
+        String(participant.paymentStatus ?? "").trim().toUpperCase() ===
+        "FREE",
+    ).length;
+    const payingCount = Math.max(0, totalRegistered - freeCount);
+    const ticketPrice = safeNonNegativeNumber(selectedEvent.eventTicketPrice);
+    const expected = safeNonNegativeNumber(payingCount * ticketPrice);
     const collected = participants.reduce(
       (sum, participant) =>
-        sum +
-        (Number.isFinite(participant.amountPaid)
-          ? Math.max(0, participant.amountPaid)
-          : 0),
+        sum + safeNonNegativeNumber(participant.amountPaid),
       0,
     );
+    const safeCollected = safeNonNegativeNumber(collected);
 
     return {
+      totalRegistered,
+      freeCount,
+      payingCount,
       expected,
-      collected,
-      remaining: expected - collected,
+      collected: safeCollected,
+      remaining: Math.max(0, expected - safeCollected),
     };
   }, [participants, selectedEvent]);
 
@@ -1245,19 +1290,29 @@ export function PostRunEventsDashboard() {
       activeOperationRef.current = true;
       setBusyKey(`${action}:${participant.id}`);
       const previous = participant;
-      const nextAmount = patch.amountPaid ?? participant.amountPaid;
+      const nextStatus = patch.paymentStatus ?? participant.paymentStatus;
+      const nextAmount = nextStatus === "FREE"
+        ? 0
+        : patch.amountPaid ?? participant.amountPaid;
       const optimisticState = paymentState(
-        { ...participant, amountPaid: nextAmount },
+        {
+          ...participant,
+          amountPaid: nextAmount,
+          paymentStatus: nextStatus,
+        },
         selectedEvent,
       );
       const optimistic: Participant = {
         ...participant,
         ...patch,
+        paymentStatus: nextStatus,
         amountPaid: nextAmount,
         depositPaid: nextAmount,
         remainingBalance: optimisticState.remaining,
         depositStatus:
-          optimisticState.kind === "unpaid" ? "PENDING" : "VERIFIED",
+          optimisticState.kind === "unpaid" || optimisticState.kind === "free"
+            ? "PENDING"
+            : "VERIFIED",
         settlementStatus:
           optimisticState.kind === "cleared"
             ? "FULLY_CLEARED"
@@ -1335,12 +1390,16 @@ export function PostRunEventsDashboard() {
 
     const updated = await updateParticipant(
       participant,
-      { amountPaid: selectedEvent.totalCost },
+      {
+        amountPaid: selectedEvent.totalCost,
+        paymentStatus: "FULLY_CLEARED",
+      },
       "clear",
     );
 
     if (updated && selectedParticipantId === updated.id) {
       setPaymentDraft(String(updated.amountPaid));
+      setPaymentStatusDraft(updated.paymentStatus);
     }
   };
 
@@ -1456,6 +1515,7 @@ export function PostRunEventsDashboard() {
   const openParticipant = (participant: Participant) => {
     setSelectedParticipantId(participant.id);
     setPaymentDraft(String(participant.amountPaid));
+    setPaymentStatusDraft(participant.paymentStatus);
     setNotesDraft(participant.internalNotes ?? "");
   };
 
@@ -1464,21 +1524,15 @@ export function PostRunEventsDashboard() {
       return;
     }
 
-    const lines = participants.map((participant, index) => {
-      const state = paymentState(participant, selectedEvent);
-      return `${index + 1}. ${participant.fullName} · Paid ${formatMoney(
-        state.amountPaid,
-      )} · Owes ${formatMoney(state.remaining)} · ${state.longLabel}`;
-    });
+    const reportMoney = (value: number) =>
+      safeNonNegativeNumber(value).toLocaleString("en-US");
     const report = [
       `📊 GlowRunners Post-Run Report – ${selectedEvent.title}`,
       `📅 ${formatEventDate(selectedEvent.runDate)}`,
-      `👥 Registered: ${participants.length}`,
-      `💰 Expected Revenue: ${formatMoney(totals.expected)}`,
-      `✅ Total Collected: ${formatMoney(totals.collected)}`,
-      `🟡 Remaining Balance: ${formatMoney(totals.remaining)}`,
-      "",
-      ...lines,
+      `👥 Registered: ${totals.totalRegistered} (${totals.payingCount} Paying + ${totals.freeCount} Free Attendees)`,
+      `💰 Expected Revenue: ${reportMoney(totals.expected)} EGP`,
+      `✅ Total Collected: ${reportMoney(totals.collected)} EGP`,
+      `🟡 Remaining Balance: ${reportMoney(totals.remaining)} EGP`,
     ].join("\n");
 
     try {
@@ -1871,6 +1925,22 @@ export function PostRunEventsDashboard() {
                       }
                       className="min-h-12 min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-bold outline-none focus:border-fuchsia-400"
                     />
+                    <label className="min-w-0 text-[10px] font-black uppercase tracking-wide text-zinc-400 sm:col-span-2">
+                      Payment status
+                      <select
+                        value={participantForm.paymentStatus}
+                        onChange={(event) =>
+                          setParticipantForm((current) => ({
+                            ...current,
+                            paymentStatus: event.target.value as PaymentStatus,
+                          }))
+                        }
+                        className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
+                      >
+                        <option value="UNPAID">Unpaid</option>
+                        <option value="FREE">🎁 Free</option>
+                      </select>
+                    </label>
                     <button
                       type="submit"
                       className="min-h-12 rounded-xl bg-white px-3 text-sm font-black text-black disabled:opacity-50 sm:col-span-2"
@@ -1885,15 +1955,16 @@ export function PostRunEventsDashboard() {
 
                 <section className="min-w-0">
                   <div
-                    className="grid min-w-0 grid-cols-4 gap-1.5"
+                    className="grid min-w-0 grid-cols-5 gap-1"
                     aria-label="Filter participants"
                   >
                     {(
                       [
                         ["all", "All"],
-                        ["unpaid", "Unpaid (0 EGP)"],
+                        ["unpaid", "Unpaid"],
                         ["deposit", "Deposit Paid"],
                         ["cleared", "Cleared"],
+                        ["free", "Free"],
                       ] as const
                     ).map(([value, label]) => (
                       <button
@@ -1972,7 +2043,9 @@ export function PostRunEventsDashboard() {
                                   ? "bg-red-950 text-red-300"
                                   : state.kind === "deposit"
                                     ? "bg-amber-950 text-amber-200"
-                                    : "bg-emerald-950 text-emerald-300"
+                                    : state.kind === "free"
+                                      ? "bg-sky-950 text-sky-200"
+                                      : "bg-emerald-950 text-emerald-300"
                               }`}
                             >
                               {state.label}
@@ -1989,6 +2062,7 @@ export function PostRunEventsDashboard() {
                               disabled={
                                 isSelectedEventArchived ||
                                 isCleared ||
+                                state.kind === "free" ||
                                 isAnyBusy
                               }
                               onClick={() => void clearParticipant(participant)}
@@ -2166,7 +2240,14 @@ export function PostRunEventsDashboard() {
                   <form
                     onSubmit={(event) => {
                       event.preventDefault();
-                      const amountPaid = Number(paymentDraft);
+                      const draftedAmount = Number(paymentDraft);
+                      const amountPaid =
+                        paymentStatusDraft === "FREE" ||
+                        paymentStatusDraft === "UNPAID"
+                          ? 0
+                          : paymentStatusDraft === "FULLY_CLEARED"
+                            ? Number(selectedEvent.eventTicketPrice) || 0
+                            : draftedAmount;
 
                       if (!Number.isFinite(amountPaid) || amountPaid < 0) {
                         setNotice({
@@ -2178,16 +2259,43 @@ export function PostRunEventsDashboard() {
 
                       void updateParticipant(
                         selectedParticipant,
-                        { amountPaid },
+                        {
+                          amountPaid,
+                          paymentStatus: paymentStatusDraft,
+                        },
                         "payment",
                       ).then((updated) => {
                         if (updated) {
                           setPaymentDraft(String(updated.amountPaid));
+                          setPaymentStatusDraft(updated.paymentStatus);
                         }
                       });
                     }}
                     className="rounded-xl border border-zinc-800 bg-black p-3"
                   >
+                  <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                    Payment status
+                    <select
+                      value={paymentStatusDraft}
+                      onChange={(event) => {
+                        const status = event.target.value as PaymentStatus;
+                        setPaymentStatusDraft(status);
+                        if (status === "FREE" || status === "UNPAID") {
+                          setPaymentDraft("0");
+                        } else if (status === "FULLY_CLEARED") {
+                          setPaymentDraft(
+                            String(Number(selectedEvent.eventTicketPrice) || 0),
+                          );
+                        }
+                      }}
+                      className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                    >
+                      <option value="UNPAID">Unpaid</option>
+                      <option value="DEPOSIT_PAID">Deposit Paid</option>
+                      <option value="FULLY_CLEARED">Cleared</option>
+                      <option value="FREE">🎁 Free</option>
+                    </select>
+                  </label>
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
                     Exact amount paid (EGP)
                     <input
@@ -2196,6 +2304,7 @@ export function PostRunEventsDashboard() {
                       step="0.01"
                       inputMode="decimal"
                       required
+                      disabled={paymentStatusDraft !== "DEPOSIT_PAID"}
                       value={paymentDraft}
                       onChange={(event) => setPaymentDraft(event.target.value)}
                       className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black outline-none focus:border-emerald-400"
