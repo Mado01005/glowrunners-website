@@ -1299,6 +1299,10 @@ export function GateControlDashboard() {
       // ignore
     }
 
+    const existingPaid = Number(runner.amountPaid) || 0;
+    const existingChange = Number(runner.changeOwed) || 0;
+    const existingCash = existingPaid + existingChange;
+
     setRunnerEditDraft({
       rowIndex: runner.rowIndex,
       expectedName: runner.name,
@@ -1309,9 +1313,10 @@ export function GateControlDashboard() {
       status: runnerStatusDraft(runner.status),
       amountPaid: String(runner.amountPaid),
       balanceOwed: String(runner.balanceOwed),
-      amountReceived: "",
+      amountReceived: existingCash > 0 ? String(existingCash) : "",
     });
   }, []);
+
 
 
 
@@ -1911,6 +1916,10 @@ export function GateControlDashboard() {
     }
 
     const isFree = previous.status === "FREE";
+    const isAlreadyCleared =
+      evaluateRunnerState(previous).isConfirmed ||
+      previous.checkedIn === true ||
+      previous.status === "CONFIRMED";
     const prevPaid = Number(previous.amountPaid) || 0;
     const prevOwed = Number(previous.balanceOwed) || 0;
     const ticketFee = prevOwed > 0 ? prevOwed : prevPaid > 0 ? prevPaid : 70;
@@ -1928,33 +1937,40 @@ export function GateControlDashboard() {
       finalOwed = 0;
       changeToReturn = 0;
       isConf = true;
-    } else if (cash === 0) {
-      finalStatus = "PENDING";
-      finalPaid = 0;
-      finalOwed = ticketFee;
-      changeToReturn = 0;
-      isConf = false;
     } else if (cash >= ticketFee) {
       finalStatus = "CONFIRMED";
       finalPaid = ticketFee;
       changeToReturn = cash - ticketFee;
       finalOwed = 0;
       isConf = true;
-    } else {
+    } else if (cash > 0 && cash < ticketFee) {
       // Partial payment
       finalStatus = "OWED";
       finalPaid = cash;
       finalOwed = ticketFee - cash;
       changeToReturn = 0;
       isConf = true;
+    } else if (isAlreadyCleared && draft.amountReceived !== "0") {
+      finalStatus = "CONFIRMED";
+      finalPaid = prevPaid > 0 ? prevPaid : ticketFee;
+      finalOwed = 0;
+      changeToReturn = Number(previous.changeOwed) || 0;
+      isConf = true;
+    } else {
+      finalStatus = "PENDING";
+      finalPaid = 0;
+      finalOwed = ticketFee;
+      changeToReturn = 0;
+      isConf = false;
     }
 
     const cashDelta =
       !isFree && finalPaid > 0
         ? Math.max(0, finalPaid - prevPaid)
-        : cash === 0
+        : finalStatus === "PENDING"
           ? -prevPaid
           : 0;
+
 
     const optimistic: RosterEntry = {
       ...previous,
@@ -2194,9 +2210,56 @@ export function GateControlDashboard() {
     })();
   };
 
+  const revertRunnerToUnpaid = (targetRunner: RosterEntry) => {
+    const unconfirmedRunner: RosterEntry = {
+      ...targetRunner,
+      status: "PENDING",
+      paymentStatus: "PENDING",
+      checkedIn: false,
+      amountPaid: 0,
+      balanceOwed: 70,
+      changeOwed: 0,
+    };
 
+    const cashDelta = -Math.max(0, targetRunner.amountPaid || 0);
+    replaceRunnerInDashboard(unconfirmedRunner, cashDelta);
+    closeRunnerEditor();
+    setFeedback({
+      tone: "idle",
+      message: `${targetRunner.name} marked as unpaid.`,
+    });
+
+    void (async () => {
+      try {
+        await fetch("/api/admin/roster", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            Pragma: "no-cache",
+          },
+          cache: "no-store",
+          body: JSON.stringify({
+            rowIndex: targetRunner.rowIndex,
+            expectedName: targetRunner.name,
+            expectedPhone: targetRunner.phone,
+            name: targetRunner.name,
+            phone: targetRunner.phone,
+            paymentType: targetRunner.paymentType,
+            status: "PENDING",
+            amountPaid: 0,
+            balanceOwed: 70,
+            changeOwed: 0,
+          }),
+        });
+      } catch (err) {
+        console.warn("Background revert to unpaid failed", err);
+      }
+    })();
+  };
 
   const copyGateReport = async () => {
+
     const cashExpenses = expenses.reduce(
       (sum, expense) =>
         sum +
@@ -2799,9 +2862,49 @@ export function GateControlDashboard() {
               </button>
             </div>
 
-            <div className="mt-3 rounded-xl border border-white/10 bg-black/60 p-3">
-              <p className="truncate text-base font-black text-white">{runnerEditDraft.name}</p>
-              <p className="mt-0.5 text-xs text-zinc-400">{runnerEditDraft.phone || "No contact recorded"}</p>
+            <div className="mt-3 flex items-center justify-between rounded-xl border border-white/10 bg-black/60 p-3">
+              <div className="min-w-0 flex-1 pr-2">
+                <p className="truncate text-base font-black text-white">{runnerEditDraft.name}</p>
+                <p className="mt-0.5 text-xs text-zinc-400">{runnerEditDraft.phone || "No contact recorded"}</p>
+              </div>
+              {(() => {
+                const currentRunner = dashboard.roster.find(
+                  (r) => r.rowIndex === runnerEditDraft.rowIndex,
+                );
+                const isConf = currentRunner
+                  ? evaluateRunnerState(currentRunner).isConfirmed || currentRunner.checkedIn || currentRunner.status === "CONFIRMED"
+                  : false;
+                const isFree = currentRunner?.status === "FREE";
+                const paid = Number(currentRunner?.amountPaid) || 0;
+                const change = Number(currentRunner?.changeOwed) || 0;
+
+                if (change > 0) {
+                  return (
+                    <span className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-1 text-[10px] font-black text-rose-300">
+                      🔴 {change} EGP Change
+                    </span>
+                  );
+                }
+                if (isFree) {
+                  return (
+                    <span className="rounded-lg border border-pink-500/30 bg-pink-500/10 px-2.5 py-1 text-[10px] font-black text-pink-300">
+                      🎁 Free
+                    </span>
+                  );
+                }
+                if (isConf) {
+                  return (
+                    <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-black text-emerald-300">
+                      ✅ Cleared ({paid > 0 ? `${paid} EGP` : "Paid"})
+                    </span>
+                  );
+                }
+                return (
+                  <span className="rounded-lg border border-orange-500/30 bg-orange-500/10 px-2.5 py-1 text-[10px] font-black text-orange-300">
+                    ⏳ Unpaid
+                  </span>
+                );
+              })()}
             </div>
 
             <div className="mt-4 flex min-w-0 flex-col gap-3">
@@ -2838,6 +2941,9 @@ export function GateControlDashboard() {
               const currentRunner = dashboard.roster.find(
                 (r) => r.rowIndex === runnerEditDraft.rowIndex,
               );
+              const isAlreadyCleared = currentRunner
+                ? evaluateRunnerState(currentRunner).isConfirmed || currentRunner.checkedIn || currentRunner.status === "CONFIRMED"
+                : false;
               const isFree = currentRunner?.status === "FREE";
               const currentPendingChange =
                 Number(currentRunner?.changeOwed) || 0;
@@ -2952,7 +3058,7 @@ export function GateControlDashboard() {
                         }
                         className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
                       >
-                        💵 Mark {currentPendingChange} EGP Handed Over &amp; Clear
+                        💵 Mark {currentPendingChange} EGP Change Handed Over &amp; Clear
                       </button>
                     ) : null}
 
@@ -2962,13 +3068,6 @@ export function GateControlDashboard() {
                         className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all"
                       >
                         🎁 Confirm Free Attendee
-                      </button>
-                    ) : cash === 0 ? (
-                      <button
-                        type="submit"
-                        className="min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-800 px-4 text-sm font-black text-zinc-300 shadow-lg hover:bg-zinc-700 active:scale-95 transition-all"
-                      >
-                        ⏳ Save as Unpaid
                       </button>
                     ) : cash > ticketFee ? (
                       <button
@@ -2982,42 +3081,69 @@ export function GateControlDashboard() {
                         type="submit"
                         className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
                       >
-                        ✔ Check In &amp; Clear ({ticketFee} EGP Paid)
+                        {isAlreadyCleared
+                          ? "✔ Keep Cleared & Close"
+                          : `✔ Check In & Clear (${ticketFee} EGP Paid)`}
                       </button>
-                    ) : (
+                    ) : cash > 0 ? (
                       <button
                         type="submit"
                         className="min-h-12 w-full rounded-xl bg-amber-500 px-4 text-sm font-black text-white shadow-lg hover:bg-amber-400 active:scale-95 transition-all"
                       >
                         ⚠️ Check In &amp; Save ({cash} EGP Paid, {ticketFee - cash} EGP Owed)
                       </button>
+                    ) : isAlreadyCleared ? (
+                      <button
+                        type="submit"
+                        className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
+                      >
+                        ✔ Keep Cleared &amp; Close
+                      </button>
+                    ) : (
+                      <button
+                        type="submit"
+                        className="min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-800 px-4 text-sm font-black text-zinc-300 shadow-lg hover:bg-zinc-700 active:scale-95 transition-all"
+                      >
+                        ⏳ Save as Unpaid
+                      </button>
                     )}
 
-                  <div className="grid min-w-0 grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={closeRunnerEditor}
-                      className="min-h-11 rounded-xl border border-white/15 text-xs font-black text-zinc-300 hover:bg-white/5 active:scale-95 transition-all"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void deleteRunner()}
-                      className="min-h-11 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-xs font-black text-red-300 hover:bg-red-500/20 active:scale-95 transition-all"
-                    >
-                      🗑️ Delete Runner
-                    </button>
+                    {isAlreadyCleared && !isFree ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          currentRunner && revertRunnerToUnpaid(currentRunner)
+                        }
+                        className="min-h-10 w-full rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 text-xs font-black text-amber-300 hover:bg-amber-500/20 active:scale-95 transition-all"
+                      >
+                        ↺ Revert Runner to Unpaid
+                      </button>
+                    ) : null}
+
+                    <div className="grid min-w-0 grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={closeRunnerEditor}
+                        className="min-h-11 rounded-xl border border-white/15 text-xs font-black text-zinc-300 hover:bg-white/5 active:scale-95 transition-all"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void deleteRunner()}
+                        className="min-h-11 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-xs font-black text-red-300 hover:bg-red-500/20 active:scale-95 transition-all"
+                      >
+                        🗑️ Delete Runner
+                      </button>
+                    </div>
                   </div>
-                </div>
                 </>
               );
             })()}
 
-
-
           </form>
         </div>
+
       ) : null}
 
 
