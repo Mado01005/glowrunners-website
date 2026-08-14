@@ -1578,11 +1578,7 @@ export function GateControlDashboard() {
       cashInHand: Math.max(0, cash + queuedCash - cashExpenses),
       digitalRevenue: digital + queuedDigital,
       balanceOwed,
-      changeOwed:
-        totalChangeOwed +
-        (dashboard.changeOwed || 0) +
-        queuedChange +
-        walkInChange,
+      changeOwed: totalChangeOwed + queuedChange + walkInChange,
       runnerStateSummary: {
         owed,
         free,
@@ -1591,7 +1587,6 @@ export function GateControlDashboard() {
       },
     };
   }, [
-    dashboard.changeOwed,
     effectiveRoster,
     expenses,
     queuedCash,
@@ -1606,6 +1601,8 @@ export function GateControlDashboard() {
   const displayedCash = topMetrics.cashInHand;
   const displayedDigital = topMetrics.digitalRevenue;
   const displayedChange = topMetrics.changeOwed;
+
+
 
 
 
@@ -3050,19 +3047,28 @@ export function GateControlDashboard() {
 
                   <div className="mt-4 flex flex-col gap-2">
                     {currentPendingChange > 0 ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          currentRunner &&
-                          settleChangeHandedOver(currentRunner)
-                        }
-                        className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
-                      >
-                        💵 Mark {currentPendingChange} EGP Change Handed Over &amp; Clear
-                      </button>
-                    ) : null}
-
-                    {isFree ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            currentRunner &&
+                            settleChangeHandedOver(currentRunner)
+                          }
+                          className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
+                        >
+                          💵 Mark {currentPendingChange} EGP Change Handed Over &amp; Clear
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            currentRunner && revertRunnerToUnpaid(currentRunner)
+                          }
+                          className="min-h-10 w-full rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 text-xs font-black text-amber-300 hover:bg-amber-500/20 active:scale-95 transition-all"
+                        >
+                          ↺ Revert Runner to Unpaid
+                        </button>
+                      </>
+                    ) : isFree ? (
                       <button
                         type="submit"
                         className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all"
@@ -3093,12 +3099,23 @@ export function GateControlDashboard() {
                         ⚠️ Check In &amp; Save ({cash} EGP Paid, {ticketFee - cash} EGP Owed)
                       </button>
                     ) : isAlreadyCleared ? (
-                      <button
-                        type="submit"
-                        className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
-                      >
-                        ✔ Keep Cleared &amp; Close
-                      </button>
+                      <>
+                        <button
+                          type="submit"
+                          className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
+                        >
+                          ✔ Keep Cleared &amp; Close
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            currentRunner && revertRunnerToUnpaid(currentRunner)
+                          }
+                          className="min-h-10 w-full rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 text-xs font-black text-amber-300 hover:bg-amber-500/20 active:scale-95 transition-all"
+                        >
+                          ↺ Revert Runner to Unpaid
+                        </button>
+                      </>
                     ) : (
                       <button
                         type="submit"
@@ -3108,17 +3125,6 @@ export function GateControlDashboard() {
                       </button>
                     )}
 
-                    {isAlreadyCleared && !isFree ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          currentRunner && revertRunnerToUnpaid(currentRunner)
-                        }
-                        className="min-h-10 w-full rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 text-xs font-black text-amber-300 hover:bg-amber-500/20 active:scale-95 transition-all"
-                      >
-                        ↺ Revert Runner to Unpaid
-                      </button>
-                    ) : null}
 
                     <div className="grid min-w-0 grid-cols-2 gap-2">
                       <button
