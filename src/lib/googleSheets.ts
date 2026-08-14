@@ -293,7 +293,24 @@ export async function getSheetsClient(): Promise<sheets_v4.Sheets> {
         scopes: [GOOGLE_SHEETS_SCOPE],
       });
 
-      return google.sheets({ version: "v4", auth });
+      return google.sheets({
+        version: "v4",
+        auth,
+        timeout: 12_000,
+        retryConfig: {
+          retry: 3,
+          retryDelay: 1000,
+          httpMethodsToRetry: [
+            "GET",
+            "HEAD",
+            "PUT",
+            "POST",
+            "DELETE",
+            "OPTIONS",
+            "TRACE",
+          ],
+        },
+      });
     })().catch((error: unknown) => {
       sheetsClientPromise = undefined;
       throw error;
@@ -302,6 +319,7 @@ export async function getSheetsClient(): Promise<sheets_v4.Sheets> {
 
   return sheetsClientPromise;
 }
+
 
 /*
  * Keep the client lazy: local development may use credentials.json, while

@@ -320,31 +320,40 @@ async function apiRequest(
   headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
   headers.set("Pragma", "no-cache");
   headers.set("Expires", "0");
-  const response = await fetch(input, {
-    credentials: "same-origin",
-    ...init,
-    cache: "no-store",
-    headers,
-  });
-  const payload = await readJson(response);
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12_000);
 
-  if (typeof window !== "undefined") {
-    if (response.status === 401) {
-      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
-      const next = `${window.location.pathname}${window.location.search}`;
-      window.location.assign(`/admin/login?next=${encodeURIComponent(next)}`);
-    } else if (
-      response.status === 403 &&
-      readError(payload, "") === "Forbidden."
-    ) {
-      const next = `${window.location.pathname}${window.location.search}`;
-      window.location.assign(`/admin/login?next=${encodeURIComponent(next)}`);
+  try {
+    const response = await fetch(input, {
+      credentials: "same-origin",
+      signal: init?.signal || controller.signal,
+      ...init,
+      cache: "no-store",
+      headers,
+    });
+    const payload = await readJson(response);
+
+    if (typeof window !== "undefined") {
+      if (response.status === 401) {
+        window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        const next = `${window.location.pathname}${window.location.search}`;
+        window.location.assign(`/admin/login?next=${encodeURIComponent(next)}`);
+      } else if (
+        response.status === 403 &&
+        readError(payload, "") === "Forbidden."
+      ) {
+        const next = `${window.location.pathname}${window.location.search}`;
+        window.location.assign(`/admin/login?next=${encodeURIComponent(next)}`);
+      }
     }
-  }
 
-  return { response, payload };
+    return { response, payload };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
+
 
 async function copyText(value: string) {
   if (navigator.clipboard?.writeText) {
@@ -853,6 +862,18 @@ export function PostRunEventsDashboard() {
 
         const nextEvents = eventPayload as PostRunEvent[];
         setEventsServiceError(null);
+        setNotice((current) =>
+          current.tone === "error" ? { tone: "idle", message: "" } : current,
+        );
+        const dataSource = response.headers.get("X-Data-Source");
+        if (dataSource === "cache") {
+          setEventsConnectionMessage(
+            "⚠️ Showing cached data. Google Sheets sync is recovering...",
+          );
+        } else {
+          setEventsConnectionMessage(null);
+        }
+
         setEvents(nextEvents);
         const stored =
           typeof window !== "undefined"
@@ -887,14 +908,6 @@ export function PostRunEventsDashboard() {
           return resolved;
         });
 
-        const dataSource = response.headers.get("X-Data-Source");
-
-        if (dataSource === "cache") {
-          setEventsConnectionMessage(
-            "⚠️ Showing cached data. Google Sheets sync is recovering...",
-          );
-        }
-
         setIsLoadingEvents(false);
         return true;
       } catch {
@@ -919,7 +932,6 @@ export function PostRunEventsDashboard() {
   const loadParticipants = useCallback(async (
     eventId?: string,
   ) => {
-
     const effectiveEventId =
       eventId ||
       activeEventIdRef.current ||
@@ -934,92 +946,128 @@ export function PostRunEventsDashboard() {
 
     const requestId = participantsRequestIdRef.current + 1;
     participantsRequestIdRef.current = requestId;
-    setEventsServiceError(null);
-    setEventsConnectionMessage(null);
 
     setIsLoadingParticipants(true);
 
-    try {
-      const { response, payload } = await apiRequest(
-        `/api/events/${encodeURIComponent(effectiveEventId)}/participants`,
-        {
-          headers: {
-            "Cache-Control": "no-cache, no-store, must-revalidate",
+    const maxRetries = 3;
+    const retryDelay = 1000;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (participantsRequestIdRef.current !== requestId) return;
+
+      try {
+        const { response, payload } = await apiRequest(
+          `/api/events/${encodeURIComponent(effectiveEventId)}/participants`,
+          {
+            headers: {
+              "Cache-Control": "no-cache, no-store, must-revalidate",
+            },
           },
-        },
-      );
+        );
 
-      if (
-        !response.ok ||
-        !isObject(payload) ||
-        !Array.isArray(payload.participants)
-      ) {
-        throw new Error(readError(payload, "Participants could not be loaded."));
-      }
+        if (
+          !response.ok ||
+          !isObject(payload) ||
+          !Array.isArray(payload.participants)
+        ) {
+          throw new Error(readError(payload, "Participants could not be loaded."));
+        }
 
-      if (participantsRequestIdRef.current === requestId) {
-        const incoming = payload.participants as Participant[];
-        setParticipants((current) => {
-          if (incoming.length === 0 && current.length > 0) {
-            console.warn(
-              "Incoming participants empty; retaining current participant state.",
-            );
-            return current;
-          }
-          if (current.length === 0) {
-            return incoming;
-          }
-          const locallyCleared = new Map(
-            current
-              .filter(
-                (p) =>
-                  p.paymentStatus === "FULLY_CLEARED" ||
-                  p.settlementStatus === "FULLY_CLEARED" ||
-                  p.paymentStatus === "FREE",
-              )
-              .map((p) => [p.id, p]),
+        if (participantsRequestIdRef.current === requestId) {
+          // Auto-clear recovered error banners on HTTP 200 OK
+          setEventsServiceError(null);
+          setEventsConnectionMessage(null);
+          setNotice((current) =>
+            current.tone === "error" ? { tone: "idle", message: "" } : current,
           );
 
-          return incoming.map((p) => {
-            const existing = locallyCleared.get(p.id);
-            if (
-              existing &&
-              p.paymentStatus !== "FULLY_CLEARED" &&
-              p.paymentStatus !== "FREE"
-            ) {
-              return {
-                ...p,
-                paymentStatus: existing.paymentStatus,
-                settlementStatus: existing.settlementStatus,
-                amountPaid: Math.max(p.amountPaid, existing.amountPaid),
-                depositPaid: Math.max(p.depositPaid, existing.depositPaid),
-                remainingBalance: 0,
-              };
+          const incoming = payload.participants as Participant[];
+          setParticipants((current) => {
+            if (incoming.length === 0 && current.length > 0) {
+              console.warn(
+                "Incoming participants empty; retaining current participant state.",
+              );
+              return current;
             }
-            return p;
+            if (current.length === 0) {
+              return incoming;
+            }
+            const locallyCleared = new Map(
+              current
+                .filter(
+                  (p) =>
+                    p.paymentStatus === "FULLY_CLEARED" ||
+                    p.settlementStatus === "FULLY_CLEARED" ||
+                    p.paymentStatus === "FREE",
+                )
+                .map((p) => [p.id, p]),
+            );
+
+            return incoming.map((p) => {
+              const existing = locallyCleared.get(p.id);
+              if (
+                existing &&
+                p.paymentStatus !== "FULLY_CLEARED" &&
+                p.paymentStatus !== "FREE"
+              ) {
+                return {
+                  ...p,
+                  paymentStatus: existing.paymentStatus,
+                  settlementStatus: existing.settlementStatus,
+                  amountPaid: Math.max(p.amountPaid, existing.amountPaid),
+                  depositPaid: Math.max(p.depositPaid, existing.depositPaid),
+                  remainingBalance: 0,
+                };
+              }
+              return p;
+            });
           });
-        });
-      }
-    } catch (error) {
-      console.error(
-        "Background fetch failed, preserving current roster in state",
-        error,
-      );
-      if (participantsRequestIdRef.current === requestId) {
-        setNotice({
-          tone: "error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "Participants could not be loaded.",
-        });
-      }
-    } finally {
-      if (participantsRequestIdRef.current === requestId) {
-        setIsLoadingParticipants(false);
+
+          setIsLoadingParticipants(false);
+          return;
+        }
+      } catch (error) {
+        console.warn(
+          `Participant fetch attempt ${attempt}/${maxRetries} failed:`,
+          error,
+        );
+
+        if (attempt < maxRetries) {
+          // Keep skeleton loader active during silent retry
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        } else {
+          // All retries failed: retain existing participant state
+          console.error(
+            "All participant fetch retries failed, preserving current roster in state",
+            error,
+          );
+          if (participantsRequestIdRef.current === requestId) {
+            setParticipants((current) => {
+              if (current.length === 0) {
+                setNotice({
+                  tone: "error",
+                  message:
+                    error instanceof Error
+                      ? error.message
+                      : "Participants could not be loaded.",
+                });
+              } else {
+                setEventsConnectionMessage(
+                  "⚠️ Showing cached data. Google Sheets sync is recovering...",
+                );
+              }
+              return current;
+            });
+          }
+        }
       }
     }
+
+    if (participantsRequestIdRef.current === requestId) {
+      setIsLoadingParticipants(false);
+    }
   }, []);
+
 
 
   useEffect(() => {
