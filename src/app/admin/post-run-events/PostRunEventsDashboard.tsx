@@ -1627,8 +1627,8 @@ export function PostRunEventsDashboard() {
         message: `${created.fullName} was added.`,
       });
       notifyGateRosterChanged();
-      void loadParticipants(selectedEvent.id);
     } catch (error) {
+
 
       setNotice({
         tone: "error",
@@ -3074,10 +3074,10 @@ export function PostRunEventsDashboard() {
                         return;
                       }
 
-                      // 1. Close modal immediately for smooth UI
+                      // 1. Close modal immediately for smooth UI (< 50ms)
                       setSelectedParticipantId("");
 
-                      // 2. Perform optimistic update and sync
+                      // 2. Perform optimistic update and background sync
                       void updateParticipant(
                         selectedParticipant,
                         {
@@ -3090,27 +3090,11 @@ export function PostRunEventsDashboard() {
                           remainingPaymentMethod: remainingPaymentMethodDraft,
                         },
                         "edit",
-                      ).then((updated) => {
-                        if (updated) {
-                          setParticipantNameDraft(updated.fullName);
-                          setParticipantContactDraft(updated.phoneNumber);
-                          setPaymentDraft(String(updated.amountPaid));
-                          setPaymentStatusDraft(updated.paymentStatus);
-                          setDepositPaymentMethodDraft(
-                            updated.depositPaymentMethod || "InstaPay",
-                          );
-                          setRemainingPaymentMethodDraft(
-                            updated.remainingPaymentMethod || "Cash",
-                          );
-
-                          if (selectedEvent) {
-                            void loadParticipants(selectedEvent.id);
-                          }
-                        }
-                      });
+                      );
                     }}
                     className="flex min-w-0 flex-col gap-3 rounded-xl border border-zinc-800 bg-black p-3"
                   >
+
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
                     Name
                     <input
