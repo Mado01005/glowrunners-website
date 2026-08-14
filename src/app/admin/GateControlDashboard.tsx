@@ -613,7 +613,7 @@ export function GateControlDashboard() {
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isActivityLoading, setIsActivityLoading] = useState(false);
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [postRunSignups, setPostRunSignups] = useState(0);
+
   const [walkInName, setWalkInName] = useState("");
   const [walkInPhone, setWalkInPhone] = useState("");
   const [walkInMethod, setWalkInMethod] =
@@ -889,53 +889,6 @@ export function GateControlDashboard() {
     }
   }, [handleUnauthorized]);
 
-  const refreshPostRunSignups = useCallback(async () => {
-    try {
-      const response = await fetch("/api/events", { cache: "no-store" });
-      const payload = await readJson(response);
-
-      if (
-        handleUnauthorized(response) ||
-        !response.ok ||
-        !isRecord(payload) ||
-        !Array.isArray(payload.events)
-      ) {
-        return;
-      }
-
-      const eventIds = payload.events.flatMap((event) =>
-        isRecord(event) && typeof event.id === "string" ? [event.id] : [],
-      );
-      const participantResponses = await Promise.all(
-        eventIds.map(async (eventId) => {
-          const participantResponse = await fetch(
-            `/api/events/${encodeURIComponent(eventId)}/participants`,
-            {
-              cache: "no-store",
-              headers: { "Cache-Control": "no-cache" },
-            },
-          );
-          const participantPayload = await readJson(participantResponse);
-          return participantResponse.ok &&
-            isRecord(participantPayload) &&
-            Array.isArray(participantPayload.participants)
-            ? participantPayload.participants
-            : [];
-        }),
-      );
-      const verified = participantResponses.flat().filter(
-        (participant) =>
-          isRecord(participant) &&
-          (participant.depositStatus === "VERIFIED" ||
-            participant.settlementStatus === "FULLY_CLEARED"),
-      ).length;
-
-      setPostRunSignups(verified);
-    } catch {
-      // Report keeps a safe zero when post-run storage is unavailable.
-    }
-  }, [handleUnauthorized]);
-
   const loadActivity = useCallback(async () => {
     setIsActivityLoading(true);
 
@@ -1016,18 +969,13 @@ export function GateControlDashboard() {
     void refreshDashboard();
     void refreshLocks();
     void refreshExpenses();
-    void refreshPostRunSignups();
 
-    const dashboardTimer = window.setInterval(() => {
-      void refreshDashboard();
-    }, 12_000);
     const lockTimer = window.setInterval(() => {
       void refreshLocks();
-    }, 15_000);
+    }, 45_000);
 
     return () => {
       mountedRef.current = false;
-      window.clearInterval(dashboardTimer);
       window.clearInterval(lockTimer);
     };
   }, [
@@ -1035,8 +983,8 @@ export function GateControlDashboard() {
     refreshDashboard,
     refreshExpenses,
     refreshLocks,
-    refreshPostRunSignups,
   ]);
+
 
   useEffect(() => {
     const refreshMergedRoster = () => void refreshDashboard(true);
@@ -1585,38 +1533,97 @@ export function GateControlDashboard() {
     (sum, expense) => sum + Number(expense.amountEgp || 0),
     0,
   );
-  const runnerStateSummary = useMemo(
-    () =>
-      effectiveRoster.reduce(
-        (summary, runner) => {
-          const state = evaluateRunnerState(runner);
-          return {
-            owed: summary.owed + Number(state.isOwed),
-            free: summary.free + Number(state.isFree),
-            paid: summary.paid + (state.isFree ? 0 : state.paid),
-            balanceOwed:
-              summary.balanceOwed + (state.isOwed ? state.owed : 0),
-          };
-        },
-        {
-          owed: 0,
-          free: 0,
-          paid: 0,
-          balanceOwed: 0,
-        },
-      ),
-    [effectiveRoster],
-  );
-  const rosterCounters = useMemo(
-    () => summarizeRosterCounters(effectiveRoster),
-    [effectiveRoster],
-  );
-  const displayedConfirmed = rosterCounters.confirmed;
-  const displayedTotal = rosterCounters.total;
-  const displayedPending = rosterCounters.pending;
-  const displayedCash = dashboard.cashInHand + queuedCash;
-  const displayedDigital = dashboard.digitalRevenue + queuedDigital;
+  const {
+    computedCashInHand,
+    computedDigitalRevenue,
+    confirmedCount,
+    pendingCount,
+    totalCount,
+    runnerStateSummary,
+  } = useMemo(() => {
+    let cash = 0;
+    let digital = 0;
+    let confirmed = 0;
+    let owed = 0;
+    let free = 0;
+    let paid = 0;
+    let balanceOwed = 0;
+
+    effectiveRoster.forEach((runner) => {
+      const state = evaluateRunnerState(runner);
+      const isCleared =
+        runner.checkedIn === true ||
+        state.isConfirmed ||
+        ["CLEARED", "CONFIRMED", "PAID", "FREE"].includes(
+          (runner.paymentStatus || runner.status || "").toUpperCase(),
+        );
+
+      if (isCleared) {
+        confirmed += 1;
+      }
+
+      if (state.isOwed) {
+        owed += 1;
+        balanceOwed += state.owed;
+      }
+      if (state.isFree) {
+        free += 1;
+      }
+      if (!state.isFree && state.paid > 0) {
+        paid += state.paid;
+      }
+
+      const isCash =
+        !runner.paymentType ||
+        runner.paymentType.toLowerCase().includes("cash") ||
+        runner.paymentType === "Cash";
+
+      const paidAmount = Number(runner.amountPaid) || 0;
+      if (paidAmount > 0) {
+        if (isCash) {
+          cash += paidAmount;
+        } else {
+          digital += paidAmount;
+        }
+      }
+    });
+
+    const cashExpenses = expenses
+      .filter((e) => (e.paymentMethod || "Cash").toLowerCase().includes("cash"))
+      .reduce((sum, e) => sum + Number(e.amountEgp || 0), 0);
+
+    return {
+      computedCashInHand: Math.max(0, cash + queuedCash - cashExpenses),
+      computedDigitalRevenue: digital + queuedDigital,
+      confirmedCount: confirmed,
+      pendingCount: Math.max(0, effectiveRoster.length - confirmed),
+      totalCount: effectiveRoster.length,
+      runnerStateSummary: {
+        owed,
+        free,
+        paid,
+        balanceOwed,
+      },
+    };
+  }, [effectiveRoster, expenses, queuedCash, queuedDigital]);
+
+  const displayedConfirmed = confirmedCount;
+  const displayedTotal = totalCount;
+  const displayedPending = pendingCount;
+  const displayedCash = computedCashInHand;
+  const displayedDigital = computedDigitalRevenue;
   const displayedChange = dashboard.changeOwed + queuedChange + walkInChange;
+
+  const postRunSignups = useMemo(
+    () =>
+      effectiveRoster.filter(
+        (r) =>
+          r.source === "post-run" &&
+          (r.checkedIn || isConfirmed(r) || r.paymentStatus === "FULLY_CLEARED"),
+      ).length,
+    [effectiveRoster],
+  );
+
 
   const tabFilteredRoster = useMemo(
     () =>
