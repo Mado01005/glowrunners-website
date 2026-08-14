@@ -606,8 +606,8 @@ export function GateControlDashboard() {
   const [cameraOptions, setCameraOptions] = useState<CameraOption[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState("");
   const [isScanSuccess, setIsScanSuccess] = useState(false);
-  const [quickCheckIn, setQuickCheckIn] = useState("");
   const [offlineQueue, setOfflineQueue] = useState<OfflineCheckIn[]>([]);
+
 
   const [activities, setActivities] = useState<Activity[]>([]);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
@@ -1445,24 +1445,6 @@ export function GateControlDashboard() {
     };
   }, [isScannerEnabled, scannerKey, selectedCameraId]);
 
-  const submitQuickCheckIn = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const lookup = quickCheckIn.trim();
-    if (!lookup) return;
-
-
-    const runner = findRunnerFromQrPayload(dashboard.roster, lookup);
-    if (!runner) {
-      setFeedback({
-        tone: "error",
-        message: `No runner matches “${lookup}”. Try a full phone number, @username, exact name, or ticket ID.`,
-      });
-      return;
-    }
-
-    setQuickCheckIn("");
-    openRunnerEditor(runner);
-  };
 
 
   const walkInReceivedAmount = Number(walkInAmount);
@@ -2419,7 +2401,7 @@ export function GateControlDashboard() {
               setScannerKey((current) => current + 1);
             }}
             disabled={scannerStatus === "starting"}
-            className="mt-3 min-h-12 w-full rounded-xl bg-gradient-to-r from-orange-500 via-pink-500 to-fuchsia-600 px-4 text-sm font-black disabled:opacity-60"
+            className="mt-3 min-h-12 w-full rounded-xl bg-gradient-to-r from-orange-500 via-pink-500 to-fuchsia-600 px-4 text-sm font-black disabled:opacity-60 active:scale-95 transition-all"
           >
             {scannerStatus === "live"
               ? "📷 Restart Scanner"
@@ -2427,51 +2409,31 @@ export function GateControlDashboard() {
                 ? "Starting Scanner…"
                 : "📷 Start Scanner"}
           </button>
-
-          <form onSubmit={submitQuickCheckIn} className="mt-3 min-w-0">
-            <label className="block min-w-0">
-              <span className="mb-1 block text-[10px] font-black uppercase tracking-[0.08em] text-zinc-500">
-                ⚡ Quick Check-In Input
-              </span>
-              <input
-                value={quickCheckIn}
-                onChange={(event) => setQuickCheckIn(event.target.value)}
-                placeholder="Phone, @username, exact name, or ticket ID"
-                autoComplete="off"
-                className="min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-400"
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={!quickCheckIn.trim()}
-              className="mt-2 min-h-11 w-full rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 text-sm font-black text-emerald-300 disabled:opacity-40 hover:bg-emerald-500/20 active:scale-95 transition-all"
-            >
-              ⚡ Review & Confirm
-            </button>
-          </form>
-
         </section>
 
         <section className="min-w-0 rounded-2xl border border-white/10 bg-[#151515] p-3">
-          <div className="flex min-w-0 items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h2 className="text-lg font-black">Roster Explorer</h2>
-              <p className="mt-1 truncate text-[11px] text-zinc-500">
-                {formatEventTime(eventSettings.eventTime)} · {eventSettings.location}
-                {dashboard.isFallbackSheet ? " · fallback tab" : ""}
-              </p>
-            </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <label className="flex-1 min-w-0">
+              <span className="sr-only">Search roster</span>
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="🔍 Search by name, phone, or @username..."
+                className="min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-pink-400"
+              />
+            </label>
             <button
               type="button"
               onClick={() => void refreshDashboard(true)}
               disabled={isRefreshing}
-              className="min-h-11 shrink-0 rounded-lg border border-white/10 px-3 text-xs font-black text-zinc-300 disabled:opacity-60"
+              title="Refresh Roster"
+              className="min-h-12 shrink-0 rounded-xl border border-white/10 bg-black/40 px-3.5 text-xs font-black text-zinc-300 hover:bg-white/5 active:scale-95 transition-all disabled:opacity-60"
             >
-              {isRefreshing ? "…" : "Refresh"}
+              {isRefreshing ? "…" : "🔄"}
             </button>
           </div>
 
-          <div className="mt-3 grid min-w-0 grid-cols-4 gap-1.5">
+          <div className="mt-2.5 grid min-w-0 grid-cols-4 gap-1.5">
             {[
               ["total", "👥 Total", displayedTotal],
               ["confirmed", "🟢 Confirmed", displayedConfirmed],
@@ -2482,9 +2444,9 @@ export function GateControlDashboard() {
                 key={String(value)}
                 type="button"
                 onClick={() => setRosterFilter(value as RosterFilter)}
-                className={`min-h-11 min-w-0 rounded-lg px-1 text-[9px] font-black ${
+                className={`min-h-10 min-w-0 rounded-lg px-1 text-[9px] font-black active:scale-95 transition-all ${
                   rosterFilter === value
-                    ? "bg-white text-black"
+                    ? "bg-white text-black font-black"
                     : "border border-white/10 bg-black/30 text-zinc-400"
                 }`}
               >
@@ -2493,46 +2455,6 @@ export function GateControlDashboard() {
             ))}
           </div>
 
-          <div
-            aria-label="Roster financial state"
-            className="mt-2 grid min-w-0 grid-cols-3 overflow-hidden rounded-xl border border-white/10 bg-black/30"
-          >
-            {[
-              ["🎁", "FREE", runnerStateSummary.free, "text-fuchsia-300"],
-              ["💰", "PAID", money(runnerStateSummary.paid), "text-emerald-300"],
-              [
-                "🔴",
-                "BALANCE OWED",
-                money(runnerStateSummary.balanceOwed),
-                "text-rose-300",
-              ],
-            ].map(([icon, label, value, color], index) => (
-              <div
-                key={String(label)}
-                className={`min-w-0 px-2 py-2 text-center ${
-                  index > 0 ? "border-l border-white/10" : ""
-                }`}
-              >
-                <p className="text-xs" aria-hidden="true">{icon}</p>
-                <p className={`truncate text-[11px] font-black ${color}`}>
-                  {value}
-                </p>
-                <p className="mt-0.5 truncate text-[7px] font-black tracking-[0.06em] text-zinc-500">
-                  {label}
-                </p>
-              </div>
-            ))}
-          </div>
-
-          <label className="mt-2 block">
-            <span className="sr-only">Search roster</span>
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="🔍 Search by name, phone, or @username..."
-              className="min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-pink-400"
-            />
-          </label>
 
           <div className="mt-3 flex min-w-0 flex-col gap-1.5">
             {filteredRoster.length === 0 ? (
