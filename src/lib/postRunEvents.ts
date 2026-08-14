@@ -99,6 +99,8 @@ export type PostRunParticipant = Readonly<{
   depositStatus: PostRunDepositStatus;
   depositAmountPaidEgp: number;
   paymentMethod?: string;
+  depositPaymentMethod?: string;
+  remainingPaymentMethod?: string;
   changeOwed?: number;
   paymentScreenshotUrl: string | null;
   remainingBalanceEgp: number;
@@ -121,6 +123,8 @@ export type PostRunParticipantInput = Readonly<{
   depositStatus?: PostRunDepositStatus;
   depositAmountPaidEgp?: number;
   paymentMethod?: string;
+  depositPaymentMethod?: string;
+  remainingPaymentMethod?: string;
   changeOwed?: number;
   paymentScreenshotUrl?: string | null;
   settlementStatus?: PostRunSettlementStatus;
@@ -133,6 +137,8 @@ export type PostRunParticipantPatch = Readonly<{
   depositStatus?: PostRunDepositStatus;
   depositAmountPaidEgp?: number;
   paymentMethod?: string;
+  depositPaymentMethod?: string;
+  remainingPaymentMethod?: string;
   changeOwed?: number;
   paymentScreenshotUrl?: string | null;
   settlementStatus?: PostRunSettlementStatus;
@@ -140,6 +146,7 @@ export type PostRunParticipantPatch = Readonly<{
   deletedAt?: string | null;
   deletedByAdminPhone?: string | null;
 }>;
+
 
 
 export type PostRunEventsErrorCode =
@@ -1629,6 +1636,10 @@ function parseParticipantUpdateRow(
     "whatsappPhone",
     "depositStatus",
     "depositAmountPaidEgp",
+    "paymentMethod",
+    "depositPaymentMethod",
+    "remainingPaymentMethod",
+    "changeOwed",
     "paymentScreenshotUrl",
     "settlementStatus",
     "internalNotes",
@@ -1648,6 +1659,10 @@ function parseParticipantUpdateRow(
     whatsappPhone?: string;
     depositStatus?: PostRunDepositStatus;
     depositAmountPaidEgp?: number;
+    paymentMethod?: string;
+    depositPaymentMethod?: string;
+    remainingPaymentMethod?: string;
+    changeOwed?: number;
     paymentScreenshotUrl?: string | null;
     settlementStatus?: PostRunSettlementStatus;
     internalNotes?: string;
@@ -1684,6 +1699,31 @@ function parseParticipantUpdateRow(
       "Deposit amount paid",
       "CONFIGURATION",
     );
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "paymentMethod")) {
+    patch.paymentMethod =
+      typeof rawPatch.paymentMethod === "string"
+        ? rawPatch.paymentMethod.trim()
+        : "Cash";
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "depositPaymentMethod")) {
+    patch.depositPaymentMethod =
+      typeof rawPatch.depositPaymentMethod === "string"
+        ? rawPatch.depositPaymentMethod.trim()
+        : undefined;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "remainingPaymentMethod")) {
+    patch.remainingPaymentMethod =
+      typeof rawPatch.remainingPaymentMethod === "string"
+        ? rawPatch.remainingPaymentMethod.trim()
+        : undefined;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "changeOwed")) {
+    patch.changeOwed = Math.max(0, Number(rawPatch.changeOwed) || 0);
   }
 
   if (Object.prototype.hasOwnProperty.call(rawPatch, "paymentScreenshotUrl")) {
@@ -1728,6 +1768,7 @@ function parseParticipantUpdateRow(
       `Patch JSON has no changes in ${POST_RUN_PARTICIPANT_UPDATES_SHEET_NAME} row ${rowIndex}.`,
     );
   }
+
 
   return {
     id: requireStoredText(
@@ -1799,6 +1840,16 @@ function applyParticipantUpdate(
       update.patch.whatsappPhone ?? current.whatsappPhone,
     depositStatus,
     depositAmountPaidEgp,
+    paymentMethod:
+      update.patch.paymentMethod ?? current.paymentMethod ?? "Cash",
+    depositPaymentMethod:
+      update.patch.depositPaymentMethod ?? current.depositPaymentMethod,
+    remainingPaymentMethod:
+      update.patch.remainingPaymentMethod ?? current.remainingPaymentMethod,
+    changeOwed:
+      update.patch.changeOwed !== undefined
+        ? update.patch.changeOwed
+        : current.changeOwed || 0,
     paymentScreenshotUrl:
       update.patch.paymentScreenshotUrl === undefined
         ? current.paymentScreenshotUrl
@@ -1817,6 +1868,7 @@ function applyParticipantUpdate(
     updatedAt: update.createdAt,
     updatedByAdminPhone: update.updatedByAdminPhone,
   };
+
 }
 
 async function readEventRows(
@@ -3104,6 +3156,10 @@ export async function updateEventParticipant(
       "whatsappPhone",
       "depositStatus",
       "depositAmountPaidEgp",
+      "paymentMethod",
+      "depositPaymentMethod",
+      "remainingPaymentMethod",
+      "changeOwed",
       "paymentScreenshotUrl",
       "settlementStatus",
       "internalNotes",
@@ -3158,6 +3214,10 @@ export async function updateEventParticipant(
       whatsappPhone?: string;
       depositStatus?: PostRunDepositStatus;
       depositAmountPaidEgp?: number;
+      paymentMethod?: string;
+      depositPaymentMethod?: string;
+      remainingPaymentMethod?: string;
+      changeOwed?: number;
       paymentScreenshotUrl?: string | null;
       settlementStatus?: PostRunSettlementStatus;
       internalNotes?: string;
@@ -3191,6 +3251,35 @@ export async function updateEventParticipant(
         "Deposit amount paid",
       );
     }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "paymentMethod")) {
+      normalizedPatch.paymentMethod =
+        typeof patch.paymentMethod === "string"
+          ? patch.paymentMethod.trim()
+          : "Cash";
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "depositPaymentMethod")) {
+      normalizedPatch.depositPaymentMethod =
+        typeof patch.depositPaymentMethod === "string"
+          ? patch.depositPaymentMethod.trim()
+          : undefined;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "remainingPaymentMethod")) {
+      normalizedPatch.remainingPaymentMethod =
+        typeof patch.remainingPaymentMethod === "string"
+          ? patch.remainingPaymentMethod.trim()
+          : undefined;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "changeOwed")) {
+      normalizedPatch.changeOwed = Math.max(
+        0,
+        Number(patch.changeOwed) || 0,
+      );
+    }
+
 
     if (Object.prototype.hasOwnProperty.call(patch, "paymentScreenshotUrl")) {
       normalizedPatch.paymentScreenshotUrl = normalizeScreenshotUrl(

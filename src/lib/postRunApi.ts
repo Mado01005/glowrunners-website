@@ -45,11 +45,14 @@ export function toParticipantPatch(
     depositStatus?: PostRunParticipantPatch["depositStatus"];
     depositAmountPaidEgp?: number;
     paymentMethod?: string;
+    depositPaymentMethod?: string;
+    remainingPaymentMethod?: string;
     changeOwed?: number;
     paymentScreenshotUrl?: string | null;
     settlementStatus?: PostRunParticipantPatch["settlementStatus"];
     internalNotes?: string;
   } = {};
+
 
 
   if (hasOwn(body, "fullName") || hasOwn(body, "full_name")) {
@@ -150,6 +153,26 @@ export function toParticipantPatch(
     patch.paymentMethod = typeof value === "string" ? value.trim() : "Cash";
   }
 
+  if (
+    hasOwn(body, "depositPaymentMethod") ||
+    hasOwn(body, "deposit_payment_method")
+  ) {
+    const value =
+      body.depositPaymentMethod ?? body.deposit_payment_method;
+    patch.depositPaymentMethod =
+      typeof value === "string" ? value.trim() : undefined;
+  }
+
+  if (
+    hasOwn(body, "remainingPaymentMethod") ||
+    hasOwn(body, "remaining_payment_method")
+  ) {
+    const value =
+      body.remainingPaymentMethod ?? body.remaining_payment_method;
+    patch.remainingPaymentMethod =
+      typeof value === "string" ? value.trim() : undefined;
+  }
+
   if (hasOwn(body, "changeOwed") || hasOwn(body, "change_owed")) {
     patch.changeOwed = Math.max(
       0,
@@ -202,6 +225,14 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     amountPaid: participant.depositAmountPaidEgp,
     paymentProofUrl,
     paymentMethod: participant.paymentMethod || "Cash",
+    depositPaymentMethod:
+      participant.depositPaymentMethod ||
+      participant.paymentMethod ||
+      "InstaPay",
+    remainingPaymentMethod:
+      participant.remainingPaymentMethod ||
+      participant.paymentMethod ||
+      "Cash",
     changeOwed: participant.changeOwed || 0,
     remainingBalance: participant.remainingBalanceEgp,
     paymentStatus:
@@ -227,6 +258,7 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     internalNotes: participant.internalNotes,
   };
 }
+
 
 
 

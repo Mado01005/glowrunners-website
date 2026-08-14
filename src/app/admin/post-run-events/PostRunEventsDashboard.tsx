@@ -61,6 +61,8 @@ type Participant = Readonly<{
   depositPaid: number;
   amountPaid: number;
   paymentMethod?: string;
+  depositPaymentMethod?: string;
+  remainingPaymentMethod?: string;
   changeOwed?: number;
   paymentProofUrl: string;
   remainingBalance: number;
@@ -78,10 +80,13 @@ type ParticipantPatch = Readonly<{
   amountPaid?: number;
   paymentStatus?: PaymentStatus;
   paymentMethod?: string;
+  depositPaymentMethod?: string;
+  remainingPaymentMethod?: string;
   changeOwed?: number;
   paymentProofUrl?: string;
   internalNotes?: string;
 }>;
+
 
 
 type ApiObject = Record<string, unknown>;
@@ -728,9 +733,14 @@ export function PostRunEventsDashboard() {
   const [paymentDraft, setPaymentDraft] = useState("");
   const [paymentStatusDraft, setPaymentStatusDraft] =
     useState<PaymentStatus>("UNPAID");
-  const [paymentMethodDraft, setPaymentMethodDraft] = useState("Cash");
+  const [depositPaymentMethodDraft, setDepositPaymentMethodDraft] =
+    useState("InstaPay");
+  const [remainingPaymentMethodDraft, setRemainingPaymentMethodDraft] =
+    useState("Cash");
   const [amountReceivedDraft, setAmountReceivedDraft] = useState("");
   const [notesDraft, setNotesDraft] = useState("");
+
+
 
   const [paymentFilter, setPaymentFilter] =
     useState<PaymentFilter>("all");
@@ -1138,6 +1148,8 @@ export function PostRunEventsDashboard() {
     ).length;
     const payingCount = Math.max(0, totalRegistered - freeCount);
     const ticketPrice = safeNonNegativeNumber(selectedEvent.eventTicketPrice);
+    const depositFee =
+      safeNonNegativeNumber(selectedEvent.depositAmount) || 200;
     const expected = safeNonNegativeNumber(payingCount * ticketPrice);
 
     let cashCollected = 0;
@@ -1147,23 +1159,48 @@ export function PostRunEventsDashboard() {
     participants.forEach((p) => {
       const paid = safeNonNegativeNumber(p.amountPaid);
       const change = safeNonNegativeNumber(p.changeOwed);
-      const method = (p.paymentMethod || "").toLowerCase();
+
+      const depositMethod = (
+        p.depositPaymentMethod ||
+        p.paymentMethod ||
+        "InstaPay"
+      ).toLowerCase();
+      const remainingMethod = (
+        p.remainingPaymentMethod ||
+        p.paymentMethod ||
+        "Cash"
+      ).toLowerCase();
+
+      const depositPortion = Math.min(paid, depositFee);
+      const remainingPortion = Math.max(0, paid - depositPortion);
 
       if (
-        method.includes("instapay") ||
-        method.includes("vodafone") ||
-        method.includes("digital") ||
-        method.includes("online")
+        depositMethod.includes("instapay") ||
+        depositMethod.includes("vodafone") ||
+        depositMethod.includes("digital") ||
+        depositMethod.includes("online")
       ) {
-        digitalCollected += paid;
+        digitalCollected += depositPortion;
       } else {
-        cashCollected += paid;
+        cashCollected += depositPortion;
+      }
+
+      if (
+        remainingMethod.includes("instapay") ||
+        remainingMethod.includes("vodafone") ||
+        remainingMethod.includes("digital") ||
+        remainingMethod.includes("online")
+      ) {
+        digitalCollected += remainingPortion;
+      } else {
+        cashCollected += remainingPortion;
       }
 
       totalChangeOwed += change;
     });
 
     const collected = safeNonNegativeNumber(cashCollected + digitalCollected);
+
 
     return {
       totalRegistered,
@@ -1668,6 +1705,22 @@ export function PostRunEventsDashboard() {
         fullName: patch.fullName ?? participant.fullName,
         phoneNumber: patch.phoneNumber ?? participant.phoneNumber,
         paymentStatus: nextStatus,
+        paymentMethod:
+          patch.paymentMethod ?? participant.paymentMethod ?? "Cash",
+        depositPaymentMethod:
+          patch.depositPaymentMethod ??
+          participant.depositPaymentMethod ??
+          participant.paymentMethod ??
+          "InstaPay",
+        remainingPaymentMethod:
+          patch.remainingPaymentMethod ??
+          participant.remainingPaymentMethod ??
+          participant.paymentMethod ??
+          "Cash",
+        changeOwed:
+          patch.changeOwed !== undefined
+            ? patch.changeOwed
+            : participant.changeOwed || 0,
         amountPaid: nextAmount,
         depositPaid: nextAmount,
         remainingBalance: optimisticState.remaining,
@@ -1681,6 +1734,7 @@ export function PostRunEventsDashboard() {
             : "UNPAID",
         updatedAt: new Date().toISOString(),
       };
+
       setParticipants((current) =>
         current.map((candidate) =>
           candidate.id === participant.id ? optimistic : candidate,
@@ -1767,9 +1821,15 @@ export function PostRunEventsDashboard() {
     if (updated && selectedParticipantId === updated.id) {
       setPaymentDraft(String(updated.amountPaid));
       setPaymentStatusDraft(updated.paymentStatus);
-      setPaymentMethodDraft(updated.paymentMethod || "Cash");
+      setDepositPaymentMethodDraft(
+        updated.depositPaymentMethod || updated.paymentMethod || "InstaPay",
+      );
+      setRemainingPaymentMethodDraft(
+        updated.remainingPaymentMethod || updated.paymentMethod || "Cash",
+      );
     }
   };
+
 
   const uploadProof = async (
     participant: Participant,
@@ -1887,10 +1947,21 @@ export function PostRunEventsDashboard() {
     setParticipantContactDraft(participant.phoneNumber);
     setPaymentDraft(String(participant.amountPaid));
     setPaymentStatusDraft(participant.paymentStatus);
-    setPaymentMethodDraft(participant.paymentMethod || "Cash");
+    setDepositPaymentMethodDraft(
+      participant.depositPaymentMethod ||
+        participant.paymentMethod ||
+        "InstaPay",
+    );
+    setRemainingPaymentMethodDraft(
+      participant.remainingPaymentMethod ||
+        participant.paymentMethod ||
+        "Cash",
+    );
+
     setAmountReceivedDraft("");
     setNotesDraft(participant.internalNotes ?? "");
   };
+
 
   const reorderParticipant = useCallback(
     (
@@ -2668,33 +2739,52 @@ export function PostRunEventsDashboard() {
                           </button>
 
                           <div className="flex shrink-0 items-center gap-1.5">
-                            <span
-                              className={`rounded-full px-1.5 py-0.5 text-[8px] font-black whitespace-nowrap border ${
-                                (participant.paymentMethod || "")
-                                  .toLowerCase()
-                                  .includes("instapay") ||
-                                (participant.paymentMethod || "")
-                                  .toLowerCase()
-                                  .includes("vodafone") ||
-                                (participant.paymentMethod || "")
-                                  .toLowerCase()
-                                  .includes("digital")
-                                  ? "border-sky-800/50 bg-sky-950/80 text-sky-300"
-                                  : "border-emerald-800/50 bg-emerald-950/80 text-emerald-300"
-                              }`}
-                            >
-                              {(participant.paymentMethod || "")
-                                .toLowerCase()
-                                .includes("instapay") ||
-                              (participant.paymentMethod || "")
-                                .toLowerCase()
-                                .includes("vodafone") ||
-                              (participant.paymentMethod || "")
-                                .toLowerCase()
-                                .includes("digital")
-                                ? "📱 InstaPay"
-                                : "💵 Cash"}
-                            </span>
+                            {(() => {
+                              const depMethod = (
+                                participant.depositPaymentMethod ||
+                                participant.paymentMethod ||
+                                "InstaPay"
+                              ).toLowerCase();
+                              const remMethod = (
+                                participant.remainingPaymentMethod ||
+                                participant.paymentMethod ||
+                                "Cash"
+                              ).toLowerCase();
+                              const isDigitalDep =
+                                depMethod.includes("instapay") ||
+                                depMethod.includes("vodafone") ||
+                                depMethod.includes("digital");
+                              const isDigitalRem =
+                                remMethod.includes("instapay") ||
+                                remMethod.includes("vodafone") ||
+                                remMethod.includes("digital");
+
+                              const hasSplit =
+                                participant.amountPaid >
+                                  (selectedEvent?.depositAmount ?? 200) &&
+                                isDigitalDep !== isDigitalRem;
+
+                              return (
+                                <span
+                                  className={`rounded-full px-1.5 py-0.5 text-[8px] font-black whitespace-nowrap border ${
+                                    hasSplit
+                                      ? "border-purple-800/50 bg-purple-950/80 text-purple-300"
+                                      : isDigitalRem || isDigitalDep
+                                        ? "border-sky-800/50 bg-sky-950/80 text-sky-300"
+                                        : "border-emerald-800/50 bg-emerald-950/80 text-emerald-300"
+                                  }`}
+                                >
+                                  {hasSplit
+                                    ? isDigitalDep
+                                      ? "📱 Dep / 💵 Cash"
+                                      : "💵 Dep / 📱 Inst"
+                                    : isDigitalRem || isDigitalDep
+                                      ? "📱 InstaPay"
+                                      : "💵 Cash"}
+                                </span>
+                              );
+                            })()}
+
 
                             <span
                               className={`rounded-full px-2 py-0.5 text-[9px] font-black whitespace-nowrap ${
@@ -2995,7 +3085,9 @@ export function PostRunEventsDashboard() {
                           phoneNumber: participantContactDraft,
                           amountPaid,
                           paymentStatus: paymentStatusDraft,
-                          paymentMethod: paymentMethodDraft,
+                          paymentMethod: remainingPaymentMethodDraft,
+                          depositPaymentMethod: depositPaymentMethodDraft,
+                          remainingPaymentMethod: remainingPaymentMethodDraft,
                         },
                         "edit",
                       ).then((updated) => {
@@ -3004,7 +3096,13 @@ export function PostRunEventsDashboard() {
                           setParticipantContactDraft(updated.phoneNumber);
                           setPaymentDraft(String(updated.amountPaid));
                           setPaymentStatusDraft(updated.paymentStatus);
-                          setPaymentMethodDraft(updated.paymentMethod || "Cash");
+                          setDepositPaymentMethodDraft(
+                            updated.depositPaymentMethod || "InstaPay",
+                          );
+                          setRemainingPaymentMethodDraft(
+                            updated.remainingPaymentMethod || "Cash",
+                          );
+
                           if (selectedEvent) {
                             void loadParticipants(selectedEvent.id);
                           }
@@ -3040,17 +3138,36 @@ export function PostRunEventsDashboard() {
                       className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
                     />
                   </label>
-                  <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
-                    Payment method
-                    <select
-                      value={paymentMethodDraft}
-                      onChange={(event) => setPaymentMethodDraft(event.target.value)}
-                      className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
-                    >
-                      <option value="Cash">💵 Cash</option>
-                      <option value="InstaPay">📱 InstaPay / Vodafone Cash</option>
-                    </select>
-                  </label>
+
+                  <div className="grid min-w-0 grid-cols-1 sm:grid-cols-2 gap-2">
+                    <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                      Deposit Payment Method
+                      <select
+                        value={depositPaymentMethodDraft}
+                        onChange={(event) =>
+                          setDepositPaymentMethodDraft(event.target.value)
+                        }
+                        className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                      >
+                        <option value="InstaPay">📱 InstaPay / VF Cash</option>
+                        <option value="Cash">💵 Cash</option>
+                      </select>
+                    </label>
+                    <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                      Remaining Balance Method
+                      <select
+                        value={remainingPaymentMethodDraft}
+                        onChange={(event) =>
+                          setRemainingPaymentMethodDraft(event.target.value)
+                        }
+                        className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                      >
+                        <option value="Cash">💵 Cash</option>
+                        <option value="InstaPay">📱 InstaPay / VF Cash</option>
+                      </select>
+                    </label>
+                  </div>
+
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
                     Payment status
                     <select
@@ -3195,7 +3312,11 @@ export function PostRunEventsDashboard() {
                                     selectedParticipant.amountPaid +
                                       state.remaining,
                                   paymentStatus: "FULLY_CLEARED",
-                                  paymentMethod: paymentMethodDraft,
+                                  paymentMethod: remainingPaymentMethodDraft,
+                                  depositPaymentMethod:
+                                    depositPaymentMethodDraft,
+                                  remainingPaymentMethod:
+                                    remainingPaymentMethodDraft,
                                   changeOwed: change,
                                 },
                                 "edit",
@@ -3223,7 +3344,7 @@ export function PostRunEventsDashboard() {
                                 setSelectedParticipantId("");
                                 void clearParticipant(
                                   selectedParticipant,
-                                  paymentMethodDraft,
+                                  remainingPaymentMethodDraft,
                                 );
                               }}
                               className="min-h-12 rounded-xl bg-emerald-400 px-3 text-xs font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400 active:scale-95 transition-all"
@@ -3239,6 +3360,7 @@ export function PostRunEventsDashboard() {
                   })()}
                   </form>
                 ) : null}
+
 
 
                 <div className="mt-3 flex flex-col gap-2">
