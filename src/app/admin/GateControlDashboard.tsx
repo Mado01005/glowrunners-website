@@ -2131,6 +2131,63 @@ export function GateControlDashboard() {
     })();
   };
 
+  const settleChangeHandedOver = (targetRunner: RosterEntry) => {
+
+    const changeAmount = Number(targetRunner.changeOwed) || 0;
+    const clearedRunner: RosterEntry = {
+      ...targetRunner,
+      changeOwed: 0,
+      checkedIn: true,
+      status: "CONFIRMED",
+      paymentStatus: "CONFIRMED",
+    };
+
+    // 1. INSTANT LOCAL STATE UPDATE
+    replaceRunnerInDashboard(clearedRunner, 0);
+
+    // 2. INSTANT MODAL CLOSE
+    closeRunnerEditor();
+
+    setFeedback({
+      tone: "success",
+      message: `${targetRunner.name}: ${
+        changeAmount > 0
+          ? `${changeAmount} EGP change marked returned & cleared.`
+          : "Marked cleared."
+      }`,
+    });
+
+    // 3. NON-BLOCKING BACKGROUND SYNC
+    void (async () => {
+      try {
+        await fetch("/api/admin/roster", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            Pragma: "no-cache",
+          },
+          cache: "no-store",
+          body: JSON.stringify({
+            rowIndex: targetRunner.rowIndex,
+            expectedName: targetRunner.name,
+            expectedPhone: targetRunner.phone,
+            name: targetRunner.name,
+            phone: targetRunner.phone,
+            paymentType: targetRunner.paymentType,
+            status: "CONFIRMED",
+            amountPaid: targetRunner.amountPaid,
+            balanceOwed: 0,
+            changeOwed: 0,
+          }),
+        });
+      } catch (err) {
+        console.warn("Background change handover sync failed", err);
+      }
+    })();
+  };
+
+
 
   const copyGateReport = async () => {
     const cashExpenses = expenses.reduce(
@@ -2471,22 +2528,26 @@ export function GateControlDashboard() {
                     <div className="flex shrink-0 items-center gap-1.5">
                       <span
                         className={`rounded-full px-2 py-0.5 text-[9px] font-black whitespace-nowrap ${
-                          confirmed
-                            ? "bg-emerald-950/90 text-emerald-300 border border-emerald-800/50"
-                            : isFree
-                              ? "bg-sky-950/90 text-sky-300 border border-sky-800/50"
-                              : runner.balanceOwed > 0
-                                ? "bg-amber-950/90 text-amber-300 border border-amber-800/50"
-                                : "bg-zinc-900 text-zinc-400 border border-white/10"
+                          (Number(runner.changeOwed) || 0) > 0
+                            ? "bg-rose-950/90 text-rose-300 border border-rose-800/50"
+                            : confirmed
+                              ? "bg-emerald-950/90 text-emerald-300 border border-emerald-800/50"
+                              : isFree
+                                ? "bg-sky-950/90 text-sky-300 border border-sky-800/50"
+                                : runner.balanceOwed > 0
+                                  ? "bg-amber-950/90 text-amber-300 border border-amber-800/50"
+                                  : "bg-zinc-900 text-zinc-400 border border-white/10"
                         }`}
                       >
-                        {confirmed
-                          ? "🟢 Cleared"
-                          : isFree
-                            ? "🎁 Free"
-                            : runner.balanceOwed > 0
-                              ? `🟡 Owed ${runner.balanceOwed} EGP`
-                              : "⚪ Unpaid"}
+                        {(Number(runner.changeOwed) || 0) > 0
+                          ? `🔴 Change Owed: ${runner.changeOwed} EGP`
+                          : confirmed
+                            ? "🟢 Cleared"
+                            : isFree
+                              ? "🎁 Free"
+                              : runner.balanceOwed > 0
+                                ? `🟡 Owed ${runner.balanceOwed} EGP`
+                                : "⚪ Unpaid"}
                       </span>
 
                       <button
@@ -2494,14 +2555,21 @@ export function GateControlDashboard() {
                         onClick={() => openRunnerEditor(runner)}
                         disabled={Boolean(lockedByAnother)}
                         className={`h-8 min-w-12 shrink-0 rounded-lg px-2 text-[10px] font-black active:scale-95 transition-all ${
-                          confirmed
-                            ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
-                            : "bg-pink-500 text-white hover:bg-pink-400 shadow-md"
+                          (Number(runner.changeOwed) || 0) > 0
+                            ? "border border-rose-500/40 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25"
+                            : confirmed
+                              ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                              : "bg-pink-500 text-white hover:bg-pink-400 shadow-md"
                         } disabled:cursor-not-allowed disabled:opacity-50`}
                       >
-                        {confirmed ? "Edit" : "Clear"}
+                        {(Number(runner.changeOwed) || 0) > 0
+                          ? "Return Change"
+                          : confirmed
+                            ? "Edit"
+                            : "Clear"}
                       </button>
                     </div>
+
                   </div>
                 );
               })
@@ -3016,6 +3084,11 @@ export function GateControlDashboard() {
                   </button>
                 </div>
                 {(() => {
+                  const currentRunner = dashboard.roster.find(
+                    (r) => r.rowIndex === runnerEditDraft.rowIndex,
+                  );
+                  const currentPendingChange =
+                    Number(currentRunner?.changeOwed) || 0;
                   const owed = Number(runnerEditDraft.balanceOwed) || 0;
                   const paid = Number(runnerEditDraft.amountPaid) || 0;
                   const effectiveFee =
@@ -3023,14 +3096,27 @@ export function GateControlDashboard() {
                   const received = Number(runnerEditDraft.amountReceived) || 0;
                   const change = Math.max(0, received - effectiveFee);
 
+                  if (currentPendingChange > 0 && received === 0) {
+                    return (
+                      <div className="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/15 p-3 text-center">
+                        <p className="text-[10px] font-black uppercase tracking-wide text-rose-400">
+                          🔴 Change Pending Handover
+                        </p>
+                        <p className="mt-0.5 text-xl font-black text-rose-300">
+                          {currentPendingChange} EGP Owed to Runner
+                        </p>
+                      </div>
+                    );
+                  }
+
                   if (received > 0 && change > 0) {
                     return (
-                      <div className="mt-3 rounded-xl border border-emerald-500/40 bg-emerald-500/15 p-3 text-center">
-                        <p className="text-[10px] font-black uppercase tracking-wide text-emerald-400">
-                          💵 Change to return
+                      <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/15 p-3 text-center">
+                        <p className="text-[10px] font-black uppercase tracking-wide text-amber-400">
+                          💵 Change To Return
                         </p>
-                        <p className="mt-0.5 text-xl font-black text-emerald-300">
-                          Give {change} EGP change to runner
+                        <p className="mt-0.5 text-xl font-black text-amber-300">
+                          Hold {change} EGP change pending for runner
                         </p>
                       </div>
                     );
@@ -3048,6 +3134,11 @@ export function GateControlDashboard() {
             ) : null}
 
             {(() => {
+              const currentRunner = dashboard.roster.find(
+                (r) => r.rowIndex === runnerEditDraft.rowIndex,
+              );
+              const currentPendingChange =
+                Number(currentRunner?.changeOwed) || 0;
               const owed = Number(runnerEditDraft.balanceOwed) || 0;
               const paid = Number(runnerEditDraft.amountPaid) || 0;
               const effectiveFee =
@@ -3057,19 +3148,32 @@ export function GateControlDashboard() {
 
               return (
                 <div className="mt-4 flex flex-col gap-2">
+                  {currentPendingChange > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        currentRunner &&
+                        settleChangeHandedOver(currentRunner)
+                      }
+                      className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
+                    >
+                      💵 Mark {currentPendingChange} EGP Handed Over &amp; Clear
+                    </button>
+                  ) : null}
+
                   {change > 0 ? (
                     <button
                       type="submit"
-                      className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
+                      className="min-h-12 w-full rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 text-sm font-black text-white shadow-lg hover:from-amber-400 hover:to-orange-500 active:scale-95 transition-all"
                     >
-                      💸 Return {change} EGP Change & Mark Cleared
+                      📥 Check In &amp; Hold {change} EGP Change Owed
                     </button>
                   ) : (
                     <button
                       type="submit"
                       className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all"
                     >
-                      ✓ Save & Confirm Runner
+                      ✓ Save &amp; Confirm Runner
                     </button>
                   )}
                   <div className="grid min-w-0 grid-cols-2 gap-2">
@@ -3089,9 +3193,9 @@ export function GateControlDashboard() {
                     </button>
                   </div>
                 </div>
-
               );
             })()}
+
 
           </form>
         </div>
