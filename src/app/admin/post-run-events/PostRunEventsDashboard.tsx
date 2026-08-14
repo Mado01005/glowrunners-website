@@ -3010,15 +3010,17 @@ export function PostRunEventsDashboard() {
                     <button
                       type="button"
                       disabled={state.kind === "cleared" || isAnyBusy}
-                      onClick={() =>
-                        void clearParticipant(selectedParticipant)
-                      }
+                      onClick={() => {
+                        setSelectedParticipantId("");
+                        void clearParticipant(selectedParticipant);
+                      }}
                       className="min-h-12 rounded-xl bg-emerald-400 px-3 text-xs font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
                     >
                       {state.kind === "cleared"
                         ? "✓ Fully Cleared"
                         : "Clear Full Balance"}
                     </button>
+
                   </div>
                   </form>
                 ) : null}

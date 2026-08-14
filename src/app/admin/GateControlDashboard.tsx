@@ -638,8 +638,8 @@ export function GateControlDashboard() {
   const [runnerEditDraft, setRunnerEditDraft] =
     useState<RunnerEditDraft | null>(null);
   const [isEventSettingsSaving, setIsEventSettingsSaving] = useState(false);
-  const [isRunnerSaving, setIsRunnerSaving] = useState(false);
   const syncInFlightRef = useRef(false);
+
   const mountedRef = useRef(true);
   const scanHandlerRef = useRef<(decoded: string) => void>(() => undefined);
   const scannerRef = useRef<Html5Qrcode | null>(null);
@@ -1910,22 +1910,19 @@ export function GateControlDashboard() {
     }
   };
 
-  const saveRunner = async (event: FormEvent<HTMLFormElement>) => {
-
+  const saveRunner = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
-    if (!runnerEditDraft || isRunnerSaving) {
+    if (!runnerEditDraft) {
       return;
     }
 
-    setIsRunnerSaving(true);
     const draft = runnerEditDraft;
     const previous = dashboard.roster.find(
       (runner) => runner.rowIndex === draft.rowIndex,
     );
 
     if (!previous) {
-      setIsRunnerSaving(false);
       setFeedback({
         tone: "error",
         message: "This runner is no longer in the active roster. Refresh and retry.",
@@ -1978,65 +1975,91 @@ export function GateControlDashboard() {
       balanceOwed: Math.max(0, finalOwed),
     };
 
-    // 1. Instantly update local state & counters
+    // 1. INSTANT LOCAL STATE & COUNTER MUTATION (<10ms)
     replaceRunnerInDashboard(optimistic, cashDelta);
-    // 2. Close modal immediately and resume camera scanning
+
+    // 2. INSTANT MODAL CLOSE & CAMERA RESUME (<10ms)
     closeRunnerEditor();
 
+    setFeedback({
+      tone: "success",
+      message: `${optimistic.name} marked ${finalStatus === "CONFIRMED" ? "cleared & confirmed" : "saved"}.`,
+    });
 
-    try {
-      const response = await fetch("/api/admin/roster", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-cache, no-store, must-revalidate",
-          Pragma: "no-cache",
-        },
-        cache: "no-store",
-        body: JSON.stringify({
-          ...draft,
-          status: finalStatus,
-          amountPaid: Math.max(0, finalPaid),
-          balanceOwed: Math.max(0, finalOwed),
-        }),
-      });
-      const payload = await readJson(response);
+    // 3. NON-BLOCKING BACKGROUND SYNC (with 5s timeout)
+    void (async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5_000);
 
-      if (handleUnauthorized(response)) {
-        return;
+      try {
+        const response = await fetch("/api/admin/roster", {
+          method: "PATCH",
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            Pragma: "no-cache",
+          },
+          cache: "no-store",
+          body: JSON.stringify({
+            ...draft,
+            status: finalStatus,
+            amountPaid: Math.max(0, finalPaid),
+            balanceOwed: Math.max(0, finalOwed),
+          }),
+        });
+        clearTimeout(timeoutId);
+
+        if (handleUnauthorized(response)) {
+          return;
+        }
+
+        const payload = await readJson(response);
+        const updated =
+          response.ok && isRecord(payload)
+            ? parseRoster([payload.runner])[0]
+            : undefined;
+
+        if (updated) {
+          replaceRunnerInDashboard(updated);
+          void loadActivity();
+          void refreshDashboard();
+        }
+      } catch (error) {
+        clearTimeout(timeoutId);
+        console.warn(
+          "Background sheet sync delayed; saved in local state & enqueued to fallback",
+          error,
+        );
+        if (isConf) {
+          setOfflineQueue((current) => [
+            ...current.filter((c) => c.runnerRow !== draft.rowIndex),
+            {
+              operationId: `${draft.rowIndex}-${Date.now()}`,
+              runnerRow: draft.rowIndex,
+              phone: draft.phone,
+              runnerName: draft.name,
+              paymentMethod: settlingCash
+                ? "Cash"
+                : draft.paymentType === "Cash"
+                  ? "Cash"
+                  : "InstaPay",
+              amountDue: effectiveFee,
+              amountReceived: settlingCash
+                ? finalPaid
+                : Number(draft.amountReceived) || 0,
+              changeOwed: 0,
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+        }
+
       }
-
-      const updated =
-        response.ok && isRecord(payload)
-          ? parseRoster([payload.runner])[0]
-          : undefined;
-
-      if (!updated) {
-        throw new Error(readError(payload, "Unable to update runner."));
-      }
-
-      replaceRunnerInDashboard(updated);
-      setFeedback({
-        tone: "success",
-        message: `${updated.name} was confirmed & updated.`,
-      });
-      void loadActivity();
-      // 3. Silently re-sync with sheets in background
-      void refreshDashboard();
-    } catch (error) {
-      replaceRunnerInDashboard(previous);
-      setFeedback({
-        tone: "error",
-        message:
-          error instanceof Error ? error.message : "Unable to update runner.",
-      });
-    } finally {
-      setIsRunnerSaving(false);
-    }
+    })();
   };
 
-  const deleteRunner = async () => {
-    if (!runnerEditDraft || isRunnerSaving) {
+  const deleteRunner = () => {
+    if (!runnerEditDraft) {
       return;
     }
 
@@ -2049,73 +2072,75 @@ export function GateControlDashboard() {
       return;
     }
 
-    setIsRunnerSaving(true);
+    const deletedRow = draft.rowIndex;
+
+    // 1. INSTANT LOCAL STATE MUTATION
+    setDashboard((current) => {
+      const roster = current.roster
+        .filter((runner) => runner.rowIndex !== deletedRow)
+        .map((runner) =>
+          runner.rowIndex > deletedRow
+            ? { ...runner, rowIndex: runner.rowIndex - 1 }
+            : runner,
+        );
+      const counters = summarizeRosterCounters(roster);
+
+      return {
+        ...current,
+        roster,
+        confirmed: counters.confirmed,
+        pending: counters.pending,
+        total: counters.total,
+      };
+    });
+    setOfflineQueue((current) =>
+      current.filter((item) => item.runnerRow !== deletedRow),
+    );
+
+    // 2. INSTANT MODAL CLOSE
     closeRunnerEditor();
+    setFeedback({
+      tone: "success",
+      message: `${draft.name} was permanently removed.`,
+    });
 
-    try {
-      const response = await fetch("/api/admin/roster", {
-        method: "DELETE",
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-cache, no-store, must-revalidate",
-          Pragma: "no-cache",
-        },
-        cache: "no-store",
-        body: JSON.stringify({
-          rowIndex: draft.rowIndex,
-          expectedName: draft.name,
-          expectedPhone: draft.phone,
-        }),
-      });
-      const payload = await readJson(response);
+    // 3. NON-BLOCKING BACKGROUND DELETE (5s timeout)
+    void (async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5_000);
 
-      if (handleUnauthorized(response)) {
-        return;
+      try {
+        const response = await fetch("/api/admin/roster", {
+          method: "DELETE",
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            Pragma: "no-cache",
+          },
+          cache: "no-store",
+          body: JSON.stringify({
+            rowIndex: draft.rowIndex,
+            expectedName: draft.name,
+            expectedPhone: draft.phone,
+          }),
+        });
+        clearTimeout(timeoutId);
+
+        if (handleUnauthorized(response)) {
+          return;
+        }
+
+        void refreshDashboard(true);
+        void loadActivity();
+      } catch (error) {
+        clearTimeout(timeoutId);
+        console.warn("Background delete failed, refreshing dashboard", error);
+        void refreshDashboard(true);
       }
-
-      if (!response.ok) {
-        throw new Error(readError(payload, "Unable to delete runner."));
-      }
-
-      const deletedRow = draft.rowIndex;
-
-      setDashboard((current) => {
-        const roster = current.roster
-          .filter((runner) => runner.rowIndex !== deletedRow)
-          .map((runner) =>
-            runner.rowIndex > deletedRow
-              ? { ...runner, rowIndex: runner.rowIndex - 1 }
-              : runner,
-          );
-        const counters = summarizeRosterCounters(roster);
-
-        return {
-          ...current,
-          roster,
-          confirmed: counters.confirmed,
-          pending: counters.pending,
-          total: counters.total,
-        };
-      });
-      setOfflineQueue((current) =>
-        current.filter((item) => item.runnerRow !== deletedRow),
-      );
-      setRunnerEditDraft(null);
-      setFeedback({
-        tone: "success",
-        message: `${runnerEditDraft.name} was permanently removed.`,
-      });
-      void refreshDashboard(true);
-    } catch (error) {
-      setFeedback({
-        tone: "error",
-        message:
-          error instanceof Error ? error.message : "Unable to delete runner.",
-      });
-    } finally {
-      setIsRunnerSaving(false);
-    }
+    })();
   };
+
 
   const copyGateReport = async () => {
     const cashExpenses = expenses.reduce(
@@ -3127,29 +3152,22 @@ export function GateControlDashboard() {
                   {change > 0 ? (
                     <button
                       type="submit"
-                      disabled={isRunnerSaving}
-                      className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all disabled:opacity-60"
+                      className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
                     >
-                      {isRunnerSaving
-                        ? "Returning Change & Clearing…"
-                        : `💸 Return ${change} EGP Change & Mark Cleared`}
+                      💸 Return {change} EGP Change & Mark Cleared
                     </button>
                   ) : (
                     <button
                       type="submit"
-                      disabled={isRunnerSaving}
-                      className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all disabled:opacity-60"
+                      className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all"
                     >
-                      {isRunnerSaving
-                        ? "Saving & Confirming…"
-                        : "✓ Save & Confirm Runner"}
+                      ✓ Save & Confirm Runner
                     </button>
                   )}
                   <div className="grid min-w-0 grid-cols-2 gap-2">
                     <button
                       type="button"
                       onClick={closeRunnerEditor}
-                      disabled={isRunnerSaving}
                       className="min-h-11 rounded-xl border border-white/15 text-xs font-black text-zinc-300 hover:bg-white/5 active:scale-95 transition-all"
                     >
                       Cancel
@@ -3157,13 +3175,13 @@ export function GateControlDashboard() {
                     <button
                       type="button"
                       onClick={() => void deleteRunner()}
-                      disabled={isRunnerSaving}
-                      className="min-h-11 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-xs font-black text-red-300 hover:bg-red-500/20 active:scale-95 transition-all disabled:opacity-60"
+                      className="min-h-11 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-xs font-black text-red-300 hover:bg-red-500/20 active:scale-95 transition-all"
                     >
                       🗑️ Delete Runner
                     </button>
                   </div>
                 </div>
+
               );
             })()}
 
