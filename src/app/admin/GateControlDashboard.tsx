@@ -1299,13 +1299,6 @@ export function GateControlDashboard() {
       // ignore
     }
 
-    const owed = runner.balanceOwed;
-    const isConf = evaluateRunnerState(runner).isConfirmed;
-    const isFree = runner.status === "FREE";
-    const defaultAmountReceived = owed > 0
-      ? String(owed)
-      : (!isConf && !isFree ? "70" : "");
-
     setRunnerEditDraft({
       rowIndex: runner.rowIndex,
       expectedName: runner.name,
@@ -1316,9 +1309,10 @@ export function GateControlDashboard() {
       status: runnerStatusDraft(runner.status),
       amountPaid: String(runner.amountPaid),
       balanceOwed: String(runner.balanceOwed),
-      amountReceived: defaultAmountReceived,
+      amountReceived: "",
     });
   }, []);
+
 
 
 
@@ -2444,66 +2438,78 @@ export function GateControlDashboard() {
         </section>
 
         <section className="min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-[#151515] p-3">
-          {cameraOptions.length > 1 ? (
-            <label className="mb-3 block min-w-0">
-              <span className="mb-1 block text-[10px] font-black uppercase tracking-[0.08em] text-zinc-500">
-                Camera
-              </span>
-              <select
-                value={selectedCameraId}
-                onChange={(event) => setSelectedCameraId(event.target.value)}
-                className="min-h-11 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white outline-none focus:border-pink-400"
-              >
-                {cameraOptions.map((camera) => (
-                  <option key={camera.id} value={camera.id}>
-                    {camera.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-          <div
-            className={`relative flex min-h-[270px] w-full min-w-0 items-center justify-center overflow-hidden rounded-xl border-2 bg-black transition-colors duration-150 ${
-              isScanSuccess
-                ? "border-emerald-400 shadow-[0_0_22px_rgba(52,211,153,0.55)]"
-                : "border-transparent"
-            }`}
-          >
-            <div
-              id={SCANNER_ID}
-              className="h-full min-h-[270px] w-full overflow-hidden"
-            />
-            {scannerStatus !== "live" ? (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-b from-zinc-900 to-black p-5 text-center">
-                <span className="text-5xl" aria-hidden="true">
-                  📷
-                </span>
-                <p className="text-sm font-bold text-zinc-300">
-                  {scannerStatus === "starting"
-                    ? "Starting rear camera…"
-                    : scannerStatus === "error"
-                      ? "📷 Camera access blocked or unavailable. Please grant camera permission in browser settings, or use the manual search box below."
-                      : "QR viewfinder is inactive"}
-                </p>
-              </div>
-            ) : null}
-          </div>
           <button
             type="button"
             onClick={() => {
-              setIsScannerEnabled(true);
-              setScannerKey((current) => current + 1);
+              if (isScannerEnabled) {
+                setIsScannerEnabled(false);
+              } else {
+                setIsScannerEnabled(true);
+                setScannerKey((current) => current + 1);
+              }
             }}
             disabled={scannerStatus === "starting"}
-            className="mt-3 min-h-12 w-full rounded-xl bg-gradient-to-r from-orange-500 via-pink-500 to-fuchsia-600 px-4 text-sm font-black disabled:opacity-60 active:scale-95 transition-all"
+            className={`min-h-12 w-full rounded-xl px-4 text-sm font-black transition-all active:scale-95 ${
+              isScannerEnabled
+                ? "border border-zinc-700 bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
+                : "bg-gradient-to-r from-orange-500 via-pink-500 to-fuchsia-600 text-white shadow-lg shadow-pink-500/20 hover:brightness-110"
+            }`}
           >
-            {scannerStatus === "live"
-              ? "📷 Restart Scanner"
-              : scannerStatus === "starting"
-                ? "Starting Scanner…"
-                : "📷 Start Scanner"}
+            {isScannerEnabled
+              ? "🙈 Close Camera Scanner"
+              : "📷 Open Camera Scanner"}
           </button>
+
+          {isScannerEnabled ? (
+            <div className="mt-3">
+              {cameraOptions.length > 1 ? (
+                <label className="mb-3 block min-w-0">
+                  <span className="mb-1 block text-[10px] font-black uppercase tracking-[0.08em] text-zinc-500">
+                    Camera
+                  </span>
+                  <select
+                    value={selectedCameraId}
+                    onChange={(event) => setSelectedCameraId(event.target.value)}
+                    className="min-h-11 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white outline-none focus:border-pink-400"
+                  >
+                    {cameraOptions.map((camera) => (
+                      <option key={camera.id} value={camera.id}>
+                        {camera.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              <div
+                className={`relative flex min-h-[270px] w-full min-w-0 items-center justify-center overflow-hidden rounded-xl border-2 bg-black transition-colors duration-150 ${
+                  isScanSuccess
+                    ? "border-emerald-400 shadow-[0_0_22px_rgba(52,211,153,0.55)]"
+                    : "border-transparent"
+                }`}
+              >
+                <div
+                  id={SCANNER_ID}
+                  className="h-full min-h-[270px] w-full overflow-hidden"
+                />
+                {scannerStatus !== "live" ? (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-b from-zinc-900 to-black p-5 text-center">
+                    <span className="text-5xl" aria-hidden="true">
+                      📷
+                    </span>
+                    <p className="text-sm font-bold text-zinc-300">
+                      {scannerStatus === "starting"
+                        ? "Starting rear camera…"
+                        : scannerStatus === "error"
+                          ? "📷 Camera access blocked or unavailable. Please grant camera permission in browser settings, or use the manual search box below."
+                          : "QR viewfinder is inactive"}
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </section>
+
 
         <section className="min-w-0 rounded-2xl border border-white/10 bg-[#151515] p-3">
           <div className="flex min-w-0 items-center gap-2">
