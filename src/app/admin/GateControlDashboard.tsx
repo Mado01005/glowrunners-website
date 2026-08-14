@@ -1910,56 +1910,49 @@ export function GateControlDashboard() {
       return;
     }
 
-    const isPending = draft.status === "PENDING";
-    const isFree = draft.status === "FREE";
-    const isOwed = draft.status === "OWED";
-
+    const isFree = previous.status === "FREE";
     const prevPaid = Number(previous.amountPaid) || 0;
     const prevOwed = Number(previous.balanceOwed) || 0;
-    const effectiveFee =
-      prevOwed > 0 ? prevOwed : prevPaid > 0 ? prevPaid : 70;
-    const receivedCash = Number(draft.amountReceived) || 0;
+    const ticketFee = prevOwed > 0 ? prevOwed : prevPaid > 0 ? prevPaid : 70;
+    const cash = Number(draft.amountReceived) || 0;
 
+    let finalStatus: RunnerStatusDraft = "PENDING";
     let finalPaid = 0;
     let finalOwed = 0;
     let changeToReturn = 0;
-    let finalStatus: RunnerStatusDraft = draft.status;
     let isConf = false;
 
-    if (isPending) {
-      finalPaid = 0;
-      finalOwed = 0;
-      changeToReturn = 0;
-      finalStatus = "PENDING";
-      isConf = false;
-    } else if (isFree) {
-      finalPaid = 0;
-      finalOwed = 0;
-      changeToReturn = 0;
+    if (isFree) {
       finalStatus = "FREE";
-      isConf = true;
-    } else if (isOwed) {
       finalPaid = 0;
-      finalOwed = effectiveFee;
+      finalOwed = 0;
       changeToReturn = 0;
-      finalStatus = "OWED";
+      isConf = true;
+    } else if (cash === 0) {
+      finalStatus = "PENDING";
+      finalPaid = 0;
+      finalOwed = ticketFee;
+      changeToReturn = 0;
+      isConf = false;
+    } else if (cash >= ticketFee) {
+      finalStatus = "CONFIRMED";
+      finalPaid = ticketFee;
+      changeToReturn = cash - ticketFee;
+      finalOwed = 0;
       isConf = true;
     } else {
-      // CONFIRMED / CLEARED
+      // Partial payment
+      finalStatus = "OWED";
+      finalPaid = cash;
+      finalOwed = ticketFee - cash;
+      changeToReturn = 0;
       isConf = true;
-      finalStatus = "CONFIRMED";
-      finalPaid = effectiveFee;
-      finalOwed = 0;
-      changeToReturn =
-        receivedCash > effectiveFee
-          ? receivedCash - effectiveFee
-          : Number(previous.changeOwed) || 0;
     }
 
     const cashDelta =
-      !isFree && !isPending && (finalPaid > 0 || prevPaid > 0)
+      !isFree && finalPaid > 0
         ? Math.max(0, finalPaid - prevPaid)
-        : isPending
+        : cash === 0
           ? -prevPaid
           : 0;
 
@@ -1975,6 +1968,7 @@ export function GateControlDashboard() {
       balanceOwed: Math.max(0, finalOwed),
       changeOwed: changeToReturn,
     };
+
 
 
 
@@ -2047,13 +2041,14 @@ export function GateControlDashboard() {
                 draft.paymentType === "Vodafone Cash"
                   ? "InstaPay"
                   : "Cash",
-              amountDue: effectiveFee,
+              amountDue: ticketFee,
               amountReceived: finalPaid,
               changeOwed: changeToReturn,
               createdAt: new Date().toISOString(),
             },
           ]);
         }
+
 
 
       }
@@ -2837,201 +2832,167 @@ export function GateControlDashboard() {
                   className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-pink-400"
                 />
               </label>
-              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
-                PAYMENT / GATE STATUS
-                <select
-                  value={runnerEditDraft.status}
-                  onChange={(event) => {
-                    const status = event.target.value as RunnerStatusDraft;
-                    setRunnerEditDraft((current) =>
-                      current
-                        ? {
-                            ...current,
-                            status,
-                            ...(status === "PENDING" || status === "FREE"
-                              ? { amountPaid: "0", balanceOwed: "0", amountReceived: "" }
-                              : status === "CONFIRMED"
-                                ? { balanceOwed: "0" }
-                                : {}),
-                          }
-                        : null,
-                    );
-                  }}
-                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white focus:border-pink-400"
-                >
-                  <option value="CONFIRMED">✅ Cleared</option>
-                  <option value="PENDING">⏳ Unpaid</option>
-                  <option value="OWED">⚠️ Owed</option>
-                  <option value="FREE">🎁 Free Attendee</option>
-                </select>
-              </label>
             </div>
-
-            {runnerEditDraft.status !== "FREE" ? (
-              <div className="mt-4 rounded-xl border border-white/15 bg-white/[0.03] p-3">
-                <p className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
-                  ON-SITE CASH RECEIVED (EGP)
-                </p>
-                <input
-                  type="number"
-                  min={0}
-                  max={1_000_000}
-                  step="1"
-                  placeholder="0"
-                  value={runnerEditDraft.amountReceived}
-                  onChange={(event) => {
-                    const val = event.target.value;
-                    setRunnerEditDraft((current) =>
-                      current
-                        ? {
-                            ...current,
-                            amountReceived: val,
-                          }
-                        : null,
-                    );
-                  }}
-                  className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-base font-black text-white outline-none focus:border-emerald-400"
-                />
-                <div className="mt-2 grid grid-cols-4 gap-1.5">
-                  {[70, 100, 200].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() =>
-                        setRunnerEditDraft((current) =>
-                          current
-                            ? {
-                                ...current,
-                                amountReceived: String(preset),
-                                status: "CONFIRMED",
-                              }
-                            : null,
-                        )
-                      }
-                      className="min-h-10 rounded-lg border border-white/10 bg-white/5 text-xs font-black text-zinc-200 hover:bg-white/10 active:scale-95 transition-all"
-                    >
-                      {preset} EGP
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setRunnerEditDraft((current) => {
-                        if (!current) return null;
-                        const previous = dashboard.roster.find(
-                          (r) => r.rowIndex === current.rowIndex,
-                        );
-                        const owed = Number(previous?.balanceOwed) || 0;
-                        const paid = Number(previous?.amountPaid) || 0;
-                        const fee = owed > 0 ? owed : paid > 0 ? paid : 70;
-                        return {
-                          ...current,
-                          amountReceived: String(fee),
-                          status: "CONFIRMED",
-                        };
-                      })
-                    }
-                    className="min-h-10 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs font-black text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition-all"
-                  >
-                    EXACT
-                  </button>
-                </div>
-
-
-                {(() => {
-                  const currentRunner = dashboard.roster.find(
-                    (r) => r.rowIndex === runnerEditDraft.rowIndex,
-                  );
-                  const currentPendingChange =
-                    Number(currentRunner?.changeOwed) || 0;
-                  const owed = Number(currentRunner?.balanceOwed) || 0;
-                  const paid = Number(currentRunner?.amountPaid) || 0;
-                  const effectiveFee =
-                    owed > 0 ? owed : paid > 0 ? paid : 70;
-                  const received = Number(runnerEditDraft.amountReceived) || 0;
-                  const change = Math.max(0, received - effectiveFee);
-
-                  if (currentPendingChange > 0 && received === 0) {
-                    return (
-                      <div className="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/15 p-3 text-center">
-                        <p className="text-[10px] font-black uppercase tracking-wide text-rose-400">
-                          🔴 Change Pending Handover
-                        </p>
-                        <p className="mt-0.5 text-xl font-black text-rose-300">
-                          {currentPendingChange} EGP Owed to Runner
-                        </p>
-                      </div>
-                    );
-                  }
-
-                  if (received > 0 && change > 0) {
-                    return (
-                      <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/15 p-3 text-center">
-                        <p className="text-[10px] font-black uppercase tracking-wide text-amber-400">
-                          💵 Change To Return
-                        </p>
-                        <p className="mt-0.5 text-xl font-black text-amber-300">
-                          Hold {change} EGP change pending for runner
-                        </p>
-                      </div>
-                    );
-                  }
-                  if (received > 0 && received >= effectiveFee) {
-                    return (
-                      <p className="mt-2 text-center text-xs font-bold text-emerald-400">
-                        ✓ {effectiveFee} EGP ticket fee settled · 0 EGP balance
-                      </p>
-                    );
-                  }
-                  return null;
-                })()}
-              </div>
-            ) : null}
 
             {(() => {
               const currentRunner = dashboard.roster.find(
                 (r) => r.rowIndex === runnerEditDraft.rowIndex,
               );
+              const isFree = currentRunner?.status === "FREE";
               const currentPendingChange =
                 Number(currentRunner?.changeOwed) || 0;
               const owed = Number(currentRunner?.balanceOwed) || 0;
               const paid = Number(currentRunner?.amountPaid) || 0;
-              const effectiveFee =
-                owed > 0 ? owed : paid > 0 ? paid : 70;
-              const received = Number(runnerEditDraft.amountReceived) || 0;
-              const change = Math.max(0, received - effectiveFee);
+              const ticketFee = owed > 0 ? owed : paid > 0 ? paid : 70;
+              const cash = Number(runnerEditDraft.amountReceived) || 0;
+              const change = Math.max(0, cash - ticketFee);
 
               return (
-                <div className="mt-4 flex flex-col gap-2">
+                <>
+                  {!isFree ? (
+                    <div className="mt-4 rounded-xl border border-white/15 bg-white/[0.03] p-3">
+                      <p className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                        ON-SITE CASH RECEIVED (EGP)
+                      </p>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1_000_000}
+                        step="1"
+                        placeholder="0"
+                        value={runnerEditDraft.amountReceived}
+                        onChange={(event) => {
+                          const val = event.target.value;
+                          setRunnerEditDraft((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  amountReceived: val,
+                                }
+                              : null,
+                          );
+                        }}
+                        className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-base font-black text-white outline-none focus:border-emerald-400"
+                      />
+                      <div className="mt-2 grid grid-cols-4 gap-1.5">
+                        {[70, 100, 200].map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() =>
+                              setRunnerEditDraft((current) =>
+                                current
+                                  ? {
+                                      ...current,
+                                      amountReceived: String(preset),
+                                    }
+                                  : null,
+                              )
+                            }
+                            className="min-h-10 rounded-lg border border-white/10 bg-white/5 text-xs font-black text-zinc-200 hover:bg-white/10 active:scale-95 transition-all"
+                          >
+                            {preset} EGP
+                          </button>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRunnerEditDraft((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    amountReceived: String(ticketFee),
+                                  }
+                                : null,
+                            )
+                          }
+                          className="min-h-10 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs font-black text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition-all"
+                        >
+                          EXACT
+                        </button>
+                      </div>
 
-                  {currentPendingChange > 0 ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        currentRunner &&
-                        settleChangeHandedOver(currentRunner)
-                      }
-                      className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
-                    >
-                      💵 Mark {currentPendingChange} EGP Handed Over &amp; Clear
-                    </button>
+                      {currentPendingChange > 0 && cash === 0 ? (
+                        <div className="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/15 p-3 text-center">
+                          <p className="text-[10px] font-black uppercase tracking-wide text-rose-400">
+                            🔴 Change Pending Handover
+                          </p>
+                          <p className="mt-0.5 text-xl font-black text-rose-300">
+                            {currentPendingChange} EGP Owed to Runner
+                          </p>
+                        </div>
+                      ) : null}
+
+                      {cash > 0 && change > 0 ? (
+                        <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/15 p-3 text-center">
+                          <p className="text-[10px] font-black uppercase tracking-wide text-amber-400">
+                            💵 Change To Return
+                          </p>
+                          <p className="mt-0.5 text-xl font-black text-amber-300">
+                            Hold {change} EGP change pending for runner
+                          </p>
+                        </div>
+                      ) : null}
+
+                      {cash > 0 && cash >= ticketFee && change === 0 ? (
+                        <p className="mt-2 text-center text-xs font-bold text-emerald-400">
+                          ✓ {ticketFee} EGP ticket fee settled · 0 EGP balance
+                        </p>
+                      ) : null}
+                    </div>
                   ) : null}
 
-                  {change > 0 ? (
-                    <button
-                      type="submit"
-                      className="min-h-12 w-full rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 text-sm font-black text-white shadow-lg hover:from-amber-400 hover:to-orange-500 active:scale-95 transition-all"
-                    >
-                      📥 Check In &amp; Hold {change} EGP Change Owed
-                    </button>
-                  ) : (
-                    <button
-                      type="submit"
-                      className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all"
-                    >
-                      ✓ Save &amp; Confirm Runner
-                    </button>
-                  )}
+                  <div className="mt-4 flex flex-col gap-2">
+                    {currentPendingChange > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          currentRunner &&
+                          settleChangeHandedOver(currentRunner)
+                        }
+                        className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
+                      >
+                        💵 Mark {currentPendingChange} EGP Handed Over &amp; Clear
+                      </button>
+                    ) : null}
+
+                    {isFree ? (
+                      <button
+                        type="submit"
+                        className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all"
+                      >
+                        🎁 Confirm Free Attendee
+                      </button>
+                    ) : cash === 0 ? (
+                      <button
+                        type="submit"
+                        className="min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-800 px-4 text-sm font-black text-zinc-300 shadow-lg hover:bg-zinc-700 active:scale-95 transition-all"
+                      >
+                        ⏳ Save as Unpaid
+                      </button>
+                    ) : cash > ticketFee ? (
+                      <button
+                        type="submit"
+                        className="min-h-12 w-full rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-4 text-sm font-black text-white shadow-lg hover:from-amber-400 hover:to-orange-500 active:scale-95 transition-all"
+                      >
+                        📥 Check In &amp; Hold {change} EGP Change Owed
+                      </button>
+                    ) : cash === ticketFee ? (
+                      <button
+                        type="submit"
+                        className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all"
+                      >
+                        ✔ Check In &amp; Clear ({ticketFee} EGP Paid)
+                      </button>
+                    ) : (
+                      <button
+                        type="submit"
+                        className="min-h-12 w-full rounded-xl bg-amber-500 px-4 text-sm font-black text-white shadow-lg hover:bg-amber-400 active:scale-95 transition-all"
+                      >
+                        ⚠️ Check In &amp; Save ({cash} EGP Paid, {ticketFee - cash} EGP Owed)
+                      </button>
+                    )}
+
                   <div className="grid min-w-0 grid-cols-2 gap-2">
                     <button
                       type="button"
@@ -3049,8 +3010,10 @@ export function GateControlDashboard() {
                     </button>
                   </div>
                 </div>
+                </>
               );
             })()}
+
 
 
           </form>
