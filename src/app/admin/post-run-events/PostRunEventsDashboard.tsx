@@ -687,7 +687,19 @@ function EventFormFields({
 export function PostRunEventsDashboard() {
   const [admin, setAdmin] = useState<ActiveAdmin | null>(null);
   const [events, setEvents] = useState<PostRunEvent[]>([]);
-  const [selectedEventId, setSelectedEventId] = useState("");
+  const activeEventIdRef = useRef<string>("");
+  const [selectedEventId, setSelectedEventId] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const stored = window.localStorage.getItem("glow_active_event_id");
+        if (stored) return stored;
+      } catch {
+        // ignore
+      }
+    }
+    return "";
+  });
+
   const [showArchivedEvents, setShowArchivedEvents] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [eventModal, setEventModal] = useState<EventModal>(null);
@@ -842,17 +854,44 @@ export function PostRunEventsDashboard() {
         const nextEvents = eventPayload as PostRunEvent[];
         setEventsServiceError(null);
         setEvents(nextEvents);
-        setSelectedEventId((current) =>
-          nextEvents.some((event) => event.id === current)
-            ? current
-            : (nextEvents[0]?.id ?? ""),
-        );
+        const stored =
+          typeof window !== "undefined"
+            ? window.localStorage.getItem("glow_active_event_id")
+            : null;
+        setSelectedEventId((current) => {
+          let resolved = "";
+          if (current && nextEvents.some((event) => event.id === current)) {
+            resolved = current;
+          } else if (
+            activeEventIdRef.current &&
+            nextEvents.some((event) => event.id === activeEventIdRef.current)
+          ) {
+            resolved = activeEventIdRef.current;
+          } else if (
+            stored &&
+            nextEvents.some((event) => event.id === stored)
+          ) {
+            resolved = stored;
+          } else {
+            resolved = nextEvents[0]?.id ?? "";
+          }
+
+          activeEventIdRef.current = resolved;
+          if (typeof window !== "undefined" && resolved) {
+            try {
+              window.localStorage.setItem("glow_active_event_id", resolved);
+            } catch {
+              // ignore
+            }
+          }
+          return resolved;
+        });
 
         const dataSource = response.headers.get("X-Data-Source");
 
         if (dataSource === "cache") {
           setEventsConnectionMessage(
-            "\u26A0\uFE0F Showing cached data. Google Sheets sync is recovering...",
+            "⚠️ Showing cached data. Google Sheets sync is recovering...",
           );
         }
 
@@ -861,7 +900,7 @@ export function PostRunEventsDashboard() {
       } catch {
         if (attempt >= maxRetries) {
           setEventsConnectionMessage(
-            "\u26A0\uFE0F Connection slow. Retrying sync with Google Sheets...",
+            "⚠️ Connection slow. Retrying sync with Google Sheets...",
           );
           setIsLoadingEvents(false);
           return false;
@@ -878,28 +917,36 @@ export function PostRunEventsDashboard() {
   }, []);
 
   const loadParticipants = useCallback(async (
-    eventId: string,
-    preserveExisting = false,
+    eventId?: string,
   ) => {
+
+    const effectiveEventId =
+      eventId ||
+      activeEventIdRef.current ||
+      (typeof window !== "undefined"
+        ? window.localStorage.getItem("glow_active_event_id") || ""
+        : "");
+
+    if (!effectiveEventId) {
+      setIsLoadingParticipants(false);
+      return;
+    }
+
     const requestId = participantsRequestIdRef.current + 1;
     participantsRequestIdRef.current = requestId;
     setEventsServiceError(null);
     setEventsConnectionMessage(null);
-    if (!preserveExisting) {
-      setParticipants([]);
-    }
-
-    if (!eventId) {
-      setIsLoadingParticipants(false);
-      return;
-    }
 
     setIsLoadingParticipants(true);
 
     try {
       const { response, payload } = await apiRequest(
-        `/api/events/${encodeURIComponent(eventId)}/participants`,
-        { headers: { "Cache-Control": "no-cache" } },
+        `/api/events/${encodeURIComponent(effectiveEventId)}/participants`,
+        {
+          headers: {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+          },
+        },
       );
 
       if (
@@ -913,6 +960,12 @@ export function PostRunEventsDashboard() {
       if (participantsRequestIdRef.current === requestId) {
         const incoming = payload.participants as Participant[];
         setParticipants((current) => {
+          if (incoming.length === 0 && current.length > 0) {
+            console.warn(
+              "Incoming participants empty; retaining current participant state.",
+            );
+            return current;
+          }
           if (current.length === 0) {
             return incoming;
           }
@@ -947,8 +1000,11 @@ export function PostRunEventsDashboard() {
           });
         });
       }
-
     } catch (error) {
+      console.error(
+        "Background fetch failed, preserving current roster in state",
+        error,
+      );
       if (participantsRequestIdRef.current === requestId) {
         setNotice({
           tone: "error",
@@ -964,6 +1020,7 @@ export function PostRunEventsDashboard() {
       }
     }
   }, []);
+
 
   useEffect(() => {
     setEventsServiceError(null);
@@ -982,11 +1039,25 @@ export function PostRunEventsDashboard() {
   }, [loadEvents, loadSession]);
 
   useEffect(() => {
+    if (selectedEventId) {
+      activeEventIdRef.current = selectedEventId;
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem("glow_active_event_id", selectedEventId);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, [selectedEventId]);
+
+  useEffect(() => {
     setSelectedParticipantId("");
     setSearch("");
     setPaymentFilter("all");
     void loadParticipants(selectedEventId);
   }, [loadParticipants, selectedEventId]);
+
 
   const totals = useMemo(() => {
     if (!selectedEvent) {
@@ -1437,8 +1508,9 @@ export function PostRunEventsDashboard() {
         message: `${created.fullName} was added.`,
       });
       notifyGateRosterChanged();
-      void loadParticipants(selectedEvent.id, true);
+      void loadParticipants(selectedEvent.id);
     } catch (error) {
+
       setNotice({
         tone: "error",
         message:
@@ -2796,9 +2868,10 @@ export function PostRunEventsDashboard() {
                           setPaymentDraft(String(updated.amountPaid));
                           setPaymentStatusDraft(updated.paymentStatus);
                           if (selectedEvent) {
-                            void loadParticipants(selectedEvent.id, true);
+                            void loadParticipants(selectedEvent.id);
                           }
                         }
+
                       });
                     }}
 

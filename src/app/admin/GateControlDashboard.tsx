@@ -499,10 +499,10 @@ function eventDateLabels(sheetName: string) {
         timeZone: "UTC",
       });
   const day = sheetMatch ? Number(sheetMatch[2]) : eventDate.getUTCDate();
-  const isTuesday = weekday === "Tuesday";
   const ordinalSuffix = ordinal(day)
     .slice(String(day).length)
     .toLocaleLowerCase("en-US");
+
   const parsedEventDate = new Date(`${month} ${day}, ${year} 12:00:00 UTC`);
   const resolvedEventDate = Number.isNaN(parsedEventDate.getTime())
     ? localNoonUtc
@@ -511,13 +511,14 @@ function eventDateLabels(sheetName: string) {
   return {
     badge: `${weekday.slice(0, 3).toUpperCase()} - ${ordinal(day)} OF ${month.toUpperCase()}`,
     day: weekday,
-    kickoff: isTuesday ? "6:00 AM" : "8:00 AM",
-    location: isTuesday ? "Stanley bridge" : "Kafr abdo",
+    kickoff: "",
+    location: "",
     report: `${weekday} ${day}${ordinalSuffix} ${month}`,
     eventDate: resolvedEventDate.toISOString().slice(0, 10),
     title: `GlowRunners ${weekday.toUpperCase()}`,
   };
 }
+
 
 function formatEventTime(value: string): string {
   const match = value.match(/^(\d{2}):(\d{2})$/);
@@ -660,9 +661,10 @@ export function GateControlDashboard() {
   const eventSettings = dashboard.eventSettings ?? {
     title: dateLabels.title,
     eventDate: dateLabels.eventDate,
-    eventTime: dateLabels.day === "Tuesday" ? "06:00" : "08:00",
+    eventTime: dateLabels.kickoff,
     location: dateLabels.location,
   };
+
   const eventDateDisplay = useMemo(() => {
     const parsed = new Date(`${eventSettings.eventDate}T12:00:00`);
 
@@ -734,10 +736,28 @@ export function GateControlDashboard() {
       }
 
       if (mountedRef.current) {
+        if (parsed.sheetName && typeof window !== "undefined") {
+          try {
+            window.localStorage.setItem("glow_active_sheet_name", parsed.sheetName);
+          } catch {
+            // ignore localStorage quota errors
+          }
+        }
+
         setDashboard((current) => {
+          if (parsed.roster.length === 0 && current.roster.length > 0) {
+            console.warn("Incoming stats returned 0 roster; retaining active roster state.");
+            return {
+              ...current,
+              eventSettings: parsed.eventSettings ?? current.eventSettings,
+              sheetName: parsed.sheetName || current.sheetName,
+            };
+          }
+
           if (current.roster.length === 0) {
             return parsed;
           }
+
 
           const locallyConfirmedRows = new Set(
             current.roster
