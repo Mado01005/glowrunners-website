@@ -60,6 +60,8 @@ type Participant = Readonly<{
   depositStatus: DepositStatus;
   depositPaid: number;
   amountPaid: number;
+  paymentMethod?: string;
+  changeOwed?: number;
   paymentProofUrl: string;
   remainingBalance: number;
   paymentStatus: PaymentStatus;
@@ -75,9 +77,12 @@ type ParticipantPatch = Readonly<{
   phoneNumber?: string;
   amountPaid?: number;
   paymentStatus?: PaymentStatus;
+  paymentMethod?: string;
+  changeOwed?: number;
   paymentProofUrl?: string;
   internalNotes?: string;
 }>;
+
 
 type ApiObject = Record<string, unknown>;
 
@@ -723,7 +728,10 @@ export function PostRunEventsDashboard() {
   const [paymentDraft, setPaymentDraft] = useState("");
   const [paymentStatusDraft, setPaymentStatusDraft] =
     useState<PaymentStatus>("UNPAID");
+  const [paymentMethodDraft, setPaymentMethodDraft] = useState("Cash");
+  const [amountReceivedDraft, setAmountReceivedDraft] = useState("");
   const [notesDraft, setNotesDraft] = useState("");
+
   const [paymentFilter, setPaymentFilter] =
     useState<PaymentFilter>("all");
   const [search, setSearch] = useState("");
@@ -1116,6 +1124,9 @@ export function PostRunEventsDashboard() {
         expected: 0,
         collected: 0,
         remaining: 0,
+        cashCollected: 0,
+        digitalCollected: 0,
+        totalChangeOwed: 0,
       };
     }
 
@@ -1128,22 +1139,45 @@ export function PostRunEventsDashboard() {
     const payingCount = Math.max(0, totalRegistered - freeCount);
     const ticketPrice = safeNonNegativeNumber(selectedEvent.eventTicketPrice);
     const expected = safeNonNegativeNumber(payingCount * ticketPrice);
-    const collected = participants.reduce(
-      (sum, participant) =>
-        sum + safeNonNegativeNumber(participant.amountPaid),
-      0,
-    );
-    const safeCollected = safeNonNegativeNumber(collected);
+
+    let cashCollected = 0;
+    let digitalCollected = 0;
+    let totalChangeOwed = 0;
+
+    participants.forEach((p) => {
+      const paid = safeNonNegativeNumber(p.amountPaid);
+      const change = safeNonNegativeNumber(p.changeOwed);
+      const method = (p.paymentMethod || "").toLowerCase();
+
+      if (
+        method.includes("instapay") ||
+        method.includes("vodafone") ||
+        method.includes("digital") ||
+        method.includes("online")
+      ) {
+        digitalCollected += paid;
+      } else {
+        cashCollected += paid;
+      }
+
+      totalChangeOwed += change;
+    });
+
+    const collected = safeNonNegativeNumber(cashCollected + digitalCollected);
 
     return {
       totalRegistered,
       freeCount,
       payingCount,
       expected,
-      collected: safeCollected,
-      remaining: Math.max(0, expected - safeCollected),
+      collected,
+      remaining: Math.max(0, expected - collected),
+      cashCollected,
+      digitalCollected,
+      totalChangeOwed,
     };
   }, [participants, selectedEvent]);
+
 
   const visibleParticipants = useMemo(() => {
     if (!selectedEvent) {
@@ -1710,7 +1744,11 @@ export function PostRunEventsDashboard() {
     [selectedEvent],
   );
 
-  const clearParticipant = async (participant: Participant) => {
+  const clearParticipant = async (
+    participant: Participant,
+    method?: string,
+    changeOwed?: number,
+  ) => {
     if (!selectedEvent || selectedEvent.isArchived) {
       return;
     }
@@ -1720,6 +1758,8 @@ export function PostRunEventsDashboard() {
       {
         amountPaid: selectedEvent.totalCost,
         paymentStatus: "FULLY_CLEARED",
+        paymentMethod: method ?? participant.paymentMethod ?? "Cash",
+        changeOwed: changeOwed ?? 0,
       },
       "clear",
     );
@@ -1727,6 +1767,7 @@ export function PostRunEventsDashboard() {
     if (updated && selectedParticipantId === updated.id) {
       setPaymentDraft(String(updated.amountPaid));
       setPaymentStatusDraft(updated.paymentStatus);
+      setPaymentMethodDraft(updated.paymentMethod || "Cash");
     }
   };
 
@@ -1846,6 +1887,8 @@ export function PostRunEventsDashboard() {
     setParticipantContactDraft(participant.phoneNumber);
     setPaymentDraft(String(participant.amountPaid));
     setPaymentStatusDraft(participant.paymentStatus);
+    setPaymentMethodDraft(participant.paymentMethod || "Cash");
+    setAmountReceivedDraft("");
     setNotesDraft(participant.internalNotes ?? "");
   };
 
@@ -2296,6 +2339,9 @@ export function PostRunEventsDashboard() {
                     ["EXPECTED REVENUE", totals.expected, "text-white"],
                     ["TOTAL COLLECTED", totals.collected, "text-emerald-300"],
                     ["REMAINING BALANCE", totals.remaining, "text-amber-300"],
+                    ["💵 CASH COLLECTED", totals.cashCollected, "text-emerald-400"],
+                    ["📱 INSTAPAY / DIGITAL", totals.digitalCollected, "text-sky-300"],
+                    ["🔴 CHANGE OWED", totals.totalChangeOwed, "text-rose-300"],
                   ].map(([label, value, color]) => (
                     <div
                       className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-2"
@@ -2314,6 +2360,7 @@ export function PostRunEventsDashboard() {
                     </div>
                   ))}
                 </section>
+
 
                 <section
                   className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-2"
@@ -2622,26 +2669,59 @@ export function PostRunEventsDashboard() {
 
                           <div className="flex shrink-0 items-center gap-1.5">
                             <span
-                              className={`rounded-full px-2 py-0.5 text-[9px] font-black whitespace-nowrap ${
-                                isCleared
-                                  ? "bg-emerald-950/90 text-emerald-300 border border-emerald-800/50"
-                                  : state.kind === "free"
-                                    ? "bg-sky-950/90 text-sky-300 border border-sky-800/50"
-                                    : state.kind === "deposit"
-                                      ? "bg-amber-950/90 text-amber-200 border border-amber-800/50"
-                                      : state.remaining > 0
-                                        ? "bg-rose-950/90 text-rose-300 border border-rose-800/50"
-                                        : "bg-zinc-900 text-zinc-400 border border-white/10"
+                              className={`rounded-full px-1.5 py-0.5 text-[8px] font-black whitespace-nowrap border ${
+                                (participant.paymentMethod || "")
+                                  .toLowerCase()
+                                  .includes("instapay") ||
+                                (participant.paymentMethod || "")
+                                  .toLowerCase()
+                                  .includes("vodafone") ||
+                                (participant.paymentMethod || "")
+                                  .toLowerCase()
+                                  .includes("digital")
+                                  ? "border-sky-800/50 bg-sky-950/80 text-sky-300"
+                                  : "border-emerald-800/50 bg-emerald-950/80 text-emerald-300"
                               }`}
                             >
-                              {isCleared
-                                ? "🟢 Cleared"
-                                : state.kind === "free"
-                                  ? "🎁 Free"
-                                  : state.remaining > 0
-                                    ? `🟡 Owed ${formatCompactMoney(state.remaining)}`
-                                    : "⚪ Unpaid"}
+                              {(participant.paymentMethod || "")
+                                .toLowerCase()
+                                .includes("instapay") ||
+                              (participant.paymentMethod || "")
+                                .toLowerCase()
+                                .includes("vodafone") ||
+                              (participant.paymentMethod || "")
+                                .toLowerCase()
+                                .includes("digital")
+                                ? "📱 InstaPay"
+                                : "💵 Cash"}
                             </span>
+
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[9px] font-black whitespace-nowrap ${
+                                (Number(participant.changeOwed) || 0) > 0
+                                  ? "bg-rose-950/90 text-rose-300 border border-rose-800/50"
+                                  : isCleared
+                                    ? "bg-emerald-950/90 text-emerald-300 border border-emerald-800/50"
+                                    : state.kind === "free"
+                                      ? "bg-sky-950/90 text-sky-300 border border-sky-800/50"
+                                      : state.kind === "deposit"
+                                        ? "bg-amber-950/90 text-amber-200 border border-amber-800/50"
+                                        : state.remaining > 0
+                                          ? "bg-rose-950/90 text-rose-300 border border-rose-800/50"
+                                          : "bg-zinc-900 text-zinc-400 border border-white/10"
+                              }`}
+                            >
+                              {(Number(participant.changeOwed) || 0) > 0
+                                ? `🔴 Change: ${participant.changeOwed} EGP`
+                                : isCleared
+                                  ? "🟢 Cleared"
+                                  : state.kind === "free"
+                                    ? "🎁 Free"
+                                    : state.remaining > 0
+                                      ? `🟡 Owed ${formatCompactMoney(state.remaining)}`
+                                      : "⚪ Unpaid"}
+                            </span>
+
 
                             <button
                               type="button"
@@ -2915,6 +2995,7 @@ export function PostRunEventsDashboard() {
                           phoneNumber: participantContactDraft,
                           amountPaid,
                           paymentStatus: paymentStatusDraft,
+                          paymentMethod: paymentMethodDraft,
                         },
                         "edit",
                       ).then((updated) => {
@@ -2923,14 +3004,13 @@ export function PostRunEventsDashboard() {
                           setParticipantContactDraft(updated.phoneNumber);
                           setPaymentDraft(String(updated.amountPaid));
                           setPaymentStatusDraft(updated.paymentStatus);
+                          setPaymentMethodDraft(updated.paymentMethod || "Cash");
                           if (selectedEvent) {
                             void loadParticipants(selectedEvent.id);
                           }
                         }
-
                       });
                     }}
-
                     className="flex min-w-0 flex-col gap-3 rounded-xl border border-zinc-800 bg-black p-3"
                   >
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
@@ -2944,7 +3024,7 @@ export function PostRunEventsDashboard() {
                       onChange={(event) =>
                         setParticipantNameDraft(event.target.value)
                       }
-                      className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                      className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
                     />
                   </label>
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
@@ -2957,8 +3037,19 @@ export function PostRunEventsDashboard() {
                       onChange={(event) =>
                         setParticipantContactDraft(event.target.value)
                       }
-                      className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                      className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
                     />
+                  </label>
+                  <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                    Payment method
+                    <select
+                      value={paymentMethodDraft}
+                      onChange={(event) => setPaymentMethodDraft(event.target.value)}
+                      className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                    >
+                      <option value="Cash">💵 Cash</option>
+                      <option value="InstaPay">📱 InstaPay / Vodafone Cash</option>
+                    </select>
                   </label>
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
                     Payment status
@@ -2975,7 +3066,7 @@ export function PostRunEventsDashboard() {
                           );
                         }
                       }}
-                      className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
+                      className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-sky-400"
                     >
                       <option value="UNPAID">Unpaid</option>
                       <option value="DEPOSIT_PAID">Deposit Paid</option>
@@ -2997,33 +3088,158 @@ export function PostRunEventsDashboard() {
                       className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black outline-none focus:border-emerald-400"
                     />
                   </label>
-                  <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
-                    <button
-                      type="submit"
-                      disabled={isAnyBusy}
-                      className="min-h-12 rounded-xl bg-white px-3 text-xs font-black text-black disabled:opacity-50"
-                    >
-                      {busyKey === `edit:${selectedParticipant.id}`
-                        ? "Saving…"
-                        : "Save Participant"}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={state.kind === "cleared" || isAnyBusy}
-                      onClick={() => {
-                        setSelectedParticipantId("");
-                        void clearParticipant(selectedParticipant);
-                      }}
-                      className="min-h-12 rounded-xl bg-emerald-400 px-3 text-xs font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
-                    >
-                      {state.kind === "cleared"
-                        ? "✓ Fully Cleared"
-                        : "Clear Full Balance"}
-                    </button>
 
-                  </div>
+                  {paymentStatusDraft !== "FREE" ? (
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+                      <p className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                        ON-SITE CASH RECEIVED (EGP)
+                      </p>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="0"
+                        value={amountReceivedDraft}
+                        onChange={(event) =>
+                          setAmountReceivedDraft(event.target.value)
+                        }
+                        className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-4 text-base font-black text-white outline-none focus:border-emerald-400"
+                      />
+                      {(() => {
+                        const currentPendingChange =
+                          Number(selectedParticipant.changeOwed) || 0;
+                        const received = Number(amountReceivedDraft) || 0;
+                        const targetOwed = state.remaining;
+                        const change =
+                          received > 0 && targetOwed > 0 && received > targetOwed
+                            ? received - targetOwed
+                            : 0;
+
+                        if (currentPendingChange > 0 && received === 0) {
+                          return (
+                            <div className="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/15 p-2 text-center">
+                              <p className="text-[9px] font-black uppercase tracking-wide text-rose-400">
+                                🔴 Change Pending Handover
+                              </p>
+                              <p className="mt-0.5 text-sm font-black text-rose-300">
+                                {currentPendingChange} EGP Owed to Runner
+                              </p>
+                            </div>
+                          );
+                        }
+
+                        if (received > 0 && change > 0) {
+                          return (
+                            <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/15 p-2 text-center">
+                              <p className="text-[9px] font-black uppercase tracking-wide text-amber-400">
+                                💵 Change to Return
+                              </p>
+                              <p className="mt-0.5 text-sm font-black text-amber-300">
+                                Give {change} EGP change to runner
+                              </p>
+                            </div>
+                          );
+                        }
+
+                        return null;
+                      })()}
+                    </div>
+                  ) : null}
+
+                  {(() => {
+                    const currentPendingChange =
+                      Number(selectedParticipant.changeOwed) || 0;
+                    const received = Number(amountReceivedDraft) || 0;
+                    const targetOwed = state.remaining;
+                    const change =
+                      received > 0 && targetOwed > 0 && received > targetOwed
+                        ? received - targetOwed
+                        : 0;
+
+                    return (
+                      <div className="mt-2 flex flex-col gap-2">
+                        {currentPendingChange > 0 ? (
+                          <button
+                            type="button"
+                            disabled={isAnyBusy}
+                            onClick={() => {
+                              setSelectedParticipantId("");
+                              void updateParticipant(
+                                selectedParticipant,
+                                {
+                                  changeOwed: 0,
+                                  paymentStatus: "FULLY_CLEARED",
+                                },
+                                "clear",
+                              );
+                            }}
+                            className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-3 text-xs font-black text-white shadow-lg active:scale-95 transition-all"
+                          >
+                            💵 Mark {currentPendingChange} EGP Returned &amp; Clear
+                          </button>
+                        ) : null}
+
+                        {change > 0 ? (
+                          <button
+                            type="button"
+                            disabled={isAnyBusy}
+                            onClick={() => {
+                              setSelectedParticipantId("");
+                              void updateParticipant(
+                                selectedParticipant,
+                                {
+                                  fullName: participantNameDraft,
+                                  phoneNumber: participantContactDraft,
+                                  amountPaid:
+                                    Number(selectedEvent.eventTicketPrice) ||
+                                    selectedParticipant.amountPaid +
+                                      state.remaining,
+                                  paymentStatus: "FULLY_CLEARED",
+                                  paymentMethod: paymentMethodDraft,
+                                  changeOwed: change,
+                                },
+                                "edit",
+                              );
+                            }}
+                            className="min-h-12 w-full rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 px-3 text-xs font-black text-white shadow-lg active:scale-95 transition-all"
+                          >
+                            📥 Save &amp; Hold {change} EGP Change Owed
+                          </button>
+                        ) : (
+                          <div className="grid min-w-0 grid-cols-2 gap-2">
+                            <button
+                              type="submit"
+                              disabled={isAnyBusy}
+                              className="min-h-12 rounded-xl bg-white px-3 text-xs font-black text-black disabled:opacity-50 active:scale-95 transition-all"
+                            >
+                              {busyKey === `edit:${selectedParticipant.id}`
+                                ? "Saving…"
+                                : "Save Participant"}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={state.kind === "cleared" || isAnyBusy}
+                              onClick={() => {
+                                setSelectedParticipantId("");
+                                void clearParticipant(
+                                  selectedParticipant,
+                                  paymentMethodDraft,
+                                );
+                              }}
+                              className="min-h-12 rounded-xl bg-emerald-400 px-3 text-xs font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400 active:scale-95 transition-all"
+                            >
+                              {state.kind === "cleared"
+                                ? "✓ Fully Cleared"
+                                : "Clear Full Balance"}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                   </form>
                 ) : null}
+
 
                 <div className="mt-3 flex flex-col gap-2">
                   <p className="text-[10px] font-black tracking-[0.12em] text-zinc-400">

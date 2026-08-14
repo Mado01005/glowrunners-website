@@ -98,6 +98,8 @@ export type PostRunParticipant = Readonly<{
   whatsappPhone: string;
   depositStatus: PostRunDepositStatus;
   depositAmountPaidEgp: number;
+  paymentMethod?: string;
+  changeOwed?: number;
   paymentScreenshotUrl: string | null;
   remainingBalanceEgp: number;
   settlementStatus: PostRunSettlementStatus;
@@ -118,6 +120,8 @@ export type PostRunParticipantInput = Readonly<{
   force?: boolean;
   depositStatus?: PostRunDepositStatus;
   depositAmountPaidEgp?: number;
+  paymentMethod?: string;
+  changeOwed?: number;
   paymentScreenshotUrl?: string | null;
   settlementStatus?: PostRunSettlementStatus;
   internalNotes?: string;
@@ -128,12 +132,15 @@ export type PostRunParticipantPatch = Readonly<{
   whatsappPhone?: string;
   depositStatus?: PostRunDepositStatus;
   depositAmountPaidEgp?: number;
+  paymentMethod?: string;
+  changeOwed?: number;
   paymentScreenshotUrl?: string | null;
   settlementStatus?: PostRunSettlementStatus;
   internalNotes?: string;
   deletedAt?: string | null;
   deletedByAdminPhone?: string | null;
 }>;
+
 
 export type PostRunEventsErrorCode =
   | "CAPACITY_REACHED"

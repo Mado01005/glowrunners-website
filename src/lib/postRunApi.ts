@@ -44,10 +44,13 @@ export function toParticipantPatch(
     whatsappPhone?: string;
     depositStatus?: PostRunParticipantPatch["depositStatus"];
     depositAmountPaidEgp?: number;
+    paymentMethod?: string;
+    changeOwed?: number;
     paymentScreenshotUrl?: string | null;
     settlementStatus?: PostRunParticipantPatch["settlementStatus"];
     internalNotes?: string;
   } = {};
+
 
   if (hasOwn(body, "fullName") || hasOwn(body, "full_name")) {
     const value = body.fullName ?? body.full_name;
@@ -142,6 +145,18 @@ export function toParticipantPatch(
     }
   }
 
+  if (hasOwn(body, "paymentMethod") || hasOwn(body, "payment_method")) {
+    const value = body.paymentMethod ?? body.payment_method;
+    patch.paymentMethod = typeof value === "string" ? value.trim() : "Cash";
+  }
+
+  if (hasOwn(body, "changeOwed") || hasOwn(body, "change_owed")) {
+    patch.changeOwed = Math.max(
+      0,
+      toFiniteNumber(body.changeOwed ?? body.change_owed) || 0,
+    );
+  }
+
   return patch;
 }
 
@@ -186,6 +201,8 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     depositPaid: participant.depositAmountPaidEgp,
     amountPaid: participant.depositAmountPaidEgp,
     paymentProofUrl,
+    paymentMethod: participant.paymentMethod || "Cash",
+    changeOwed: participant.changeOwed || 0,
     remainingBalance: participant.remainingBalanceEgp,
     paymentStatus:
       participant.settlementStatus === "Free"
@@ -210,6 +227,7 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     internalNotes: participant.internalNotes,
   };
 }
+
 
 
 export function forbiddenPostRunResponse() {
