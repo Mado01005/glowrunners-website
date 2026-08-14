@@ -626,7 +626,10 @@ export function GateControlDashboard() {
     useState<"Cash" | "Digital">("Cash");
   const [isExpenseSaving, setIsExpenseSaving] = useState(false);
   const [isWalkInSaving, setIsWalkInSaving] = useState(false);
+  const [isWalkInModalOpen, setIsWalkInModalOpen] = useState(false);
+  const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [isEventSettingsOpen, setIsEventSettingsOpen] = useState(false);
+
   const [eventSettingsDraft, setEventSettingsDraft] =
     useState<GateEventSettings>({
       title: "",
@@ -1756,6 +1759,7 @@ export function GateControlDashboard() {
       setWalkInName("");
       setWalkInPhone("");
       setWalkInAmount(String(WALK_IN_FEE_EGP));
+      setIsWalkInModalOpen(false);
       const warning =
         isRecord(payload) && typeof payload.warning === "string"
           ? ` ${payload.warning}`
@@ -1764,6 +1768,7 @@ export function GateControlDashboard() {
         tone: warning ? "error" : "success",
         message: `${name} added as a walk-in. Change owed: ${money(savedWalkIn.changeOwed)}.${warning}`,
       });
+
       void loadActivity();
     } catch (error) {
       setFeedback({
@@ -1819,10 +1824,12 @@ export function GateControlDashboard() {
       setExpenses((current) => [payload.expense as Expense, ...current]);
       setExpenseDescription("");
       setExpenseAmount("");
+      setIsExpenseModalOpen(false);
       setFeedback({
         tone: "success",
         message: `${description} logged as ${money(amountEgp)}.`,
       });
+
       void loadActivity();
     } catch (error) {
       setFeedback({
@@ -2361,8 +2368,26 @@ export function GateControlDashboard() {
           ))}
         </section>
 
+        <div className="grid min-w-0 grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setIsWalkInModalOpen(true)}
+            className="min-h-9 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 px-3 text-xs font-black text-black shadow-md hover:from-orange-400 hover:to-amber-400 active:scale-95 transition-all flex items-center justify-center gap-1.5"
+          >
+            <span>+</span> Add Walk-In Runner
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsExpenseModalOpen(true)}
+            className="min-h-9 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 text-xs font-black text-rose-300 hover:bg-rose-500/20 active:scale-95 transition-all flex items-center justify-center gap-1.5"
+          >
+            <span>💸</span> Log Expense
+          </button>
+        </div>
+
         <section
           aria-label="Attendance counters"
+
           className="grid min-w-0 grid-cols-3 gap-2"
         >
           {[
@@ -2580,212 +2605,45 @@ export function GateControlDashboard() {
         </section>
 
 
-        <div
-          role="status"
-          className={`rounded-xl border px-4 py-3 text-sm font-bold ${
-            feedback.tone === "success"
-              ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-200"
-              : feedback.tone === "error"
-                ? "border-rose-400/20 bg-rose-400/10 text-rose-200"
-                : "border-white/10 bg-white/[0.04] text-zinc-400"
-          }`}
-        >
-          {feedback.message}
-        </div>
-
-        <div className="flex min-w-0 items-center justify-between rounded-xl border border-sky-400/20 bg-sky-400/[0.07] px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-xs font-black text-sky-200">
-              Local Queue: {offlineQueue.length} saved
-            </p>
-            <p className="mt-1 text-[10px] text-zinc-500">
-              Auto-resync runs when the connection returns.
-            </p>
+        {feedback.message ? (
+          <div
+            role="status"
+            className={`rounded-xl border px-4 py-3 text-sm font-bold ${
+              feedback.tone === "success"
+                ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-200"
+                : feedback.tone === "error"
+                  ? "border-rose-400/20 bg-rose-400/10 text-rose-200"
+                  : "border-white/10 bg-white/[0.04] text-zinc-400"
+            }`}
+          >
+            {feedback.message}
           </div>
-          <button
-            type="button"
-            onClick={() =>
-              void (async () => {
-                await syncOfflineQueue();
-                await refreshDashboard(true);
-              })()
-            }
-            disabled={isRefreshing}
-            className="min-h-11 shrink-0 rounded-lg border border-sky-300/20 px-3 text-[11px] font-black text-sky-200 disabled:opacity-40"
-          >
-            Sync now
-          </button>
+        ) : null}
+
+        <div className="py-1 px-3 text-xs text-neutral-400 flex items-center justify-between border-t border-neutral-800">
+          <span>Local Queue: {offlineQueue.length} saved</span>
+          {offlineQueue.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                void (async () => {
+                  await syncOfflineQueue();
+                  await refreshDashboard(true);
+                })()
+              }
+              disabled={isRefreshing}
+              className="text-emerald-400 font-medium hover:underline text-xs disabled:opacity-40"
+            >
+              Sync Now
+            </button>
+          )}
         </div>
 
-        <details className="group min-w-0 rounded-2xl border border-white/10 bg-[#151515] p-4">
-          <summary className="cursor-pointer list-none text-sm font-black text-orange-300">
-            + ADD WALK-IN RUNNER
-          </summary>
-          <form
-            onSubmit={handleWalkIn}
-            className="mt-4 flex min-w-0 flex-col gap-3"
-          >
-            <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
-              FULL NAME
-              <input
-                value={walkInName}
-                onChange={(event) => setWalkInName(event.target.value)}
-                maxLength={100}
-                className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-orange-400"
-              />
-            </label>
-            <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
-              PHONE NUMBER <span className="text-zinc-600">(OPTIONAL)</span>
-              <input
-                value={walkInPhone}
-                onChange={(event) => setWalkInPhone(event.target.value)}
-                inputMode="tel"
-                maxLength={24}
-                className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-orange-400"
-              />
-            </label>
-            <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
-              PAYMENT METHOD
-              <select
-                value={walkInMethod}
-                onChange={(event) =>
-                  setWalkInMethod(
-                    event.target.value === "InstaPay" ? "InstaPay" : "Cash",
-                  )
-                }
-                className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white"
-              >
-                <option>Cash</option>
-                <option>InstaPay</option>
-              </select>
-            </label>
-            <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
-              AMOUNT RECEIVED (EGP)
-              <input
-                value={walkInAmount}
-                onChange={(event) => setWalkInAmount(event.target.value)}
-                type="number"
-                inputMode="numeric"
-                min={WALK_IN_FEE_EGP}
-                max={1_000_000}
-                step={1}
-                className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-orange-400"
-              />
-            </label>
-            <div
-              aria-label="Quick walk-in cash amounts"
-              className="grid min-w-0 grid-cols-3 gap-2"
-            >
-              {[70, 100, 200].map((amount) => (
-                <button
-                  key={amount}
-                  type="button"
-                  onClick={() => setWalkInAmount(String(amount))}
-                  className={`min-h-11 min-w-0 rounded-xl border px-2 text-xs font-black ${
-                    walkInReceivedAmount === amount
-                      ? "border-orange-300 bg-orange-400 text-black"
-                      : "border-white/10 bg-black text-zinc-300"
-                  }`}
-                >
-                  {amount} EGP
-                </button>
-              ))}
-            </div>
-            <p
-              role="status"
-              className={`rounded-xl border px-3 py-2 text-center text-xs font-black ${
-                !hasValidWalkInAmount
-                  ? "border-amber-400/20 bg-amber-400/[0.08] text-amber-200"
-                  : walkInChange > 0
-                    ? "border-red-400/20 bg-red-400/[0.08] text-red-300"
-                    : "border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300"
-              }`}
-            >
-              {!hasValidWalkInAmount
-                ? `Enter at least ${money(WALK_IN_FEE_EGP)}`
-                : walkInChange > 0
-                  ? `🔴 RETURN CHANGE TO RUNNER: ${money(walkInChange)}`
-                  : "🟢 EXACT AMOUNT"}
-            </p>
-            <button
-              type="submit"
-              disabled={isWalkInSaving || !hasValidWalkInAmount}
-              className="min-h-12 w-full rounded-xl bg-orange-500 px-4 text-sm font-black text-black disabled:opacity-60"
-            >
-              {isWalkInSaving
-                ? "Saving…"
-                : walkInChange > 0
-                  ? `+ Confirm Walk-In · Return ${money(walkInChange)} Change`
-                  : `+ Confirm Walk-In · Exact ${money(WALK_IN_FEE_EGP)}`}
-            </button>
-          </form>
-        </details>
-
-        <details className="group min-w-0 rounded-2xl border border-white/10 bg-[#151515] p-4">
-          <summary className="cursor-pointer list-none text-sm font-black text-rose-300">
-            💸 LOG EVENT EXPENSE
-          </summary>
-          <form
-            onSubmit={handleExpense}
-            className="mt-4 flex min-w-0 flex-col gap-3"
-          >
-            <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
-              DESCRIPTION
-              <input
-                value={expenseDescription}
-                onChange={(event) =>
-                  setExpenseDescription(event.target.value)
-                }
-                maxLength={240}
-                placeholder="Water bottles"
-                className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-rose-400"
-              />
-            </label>
-            <div className="grid min-w-0 grid-cols-2 gap-2">
-              <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-500">
-                AMOUNT (EGP)
-                <input
-                  value={expenseAmount}
-                  onChange={(event) => setExpenseAmount(event.target.value)}
-                  inputMode="decimal"
-                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white outline-none focus:border-rose-400"
-                />
-              </label>
-              <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-500">
-                METHOD
-                <select
-                  value={expenseMethod}
-                  onChange={(event) =>
-                    setExpenseMethod(
-                      event.target.value === "Digital"
-                        ? "Digital"
-                        : "Cash",
-                    )
-                  }
-                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white"
-                >
-                  <option>Cash</option>
-                  <option>Digital</option>
-                </select>
-              </label>
-            </div>
-            <button
-              type="submit"
-              disabled={isExpenseSaving}
-              className="min-h-12 w-full rounded-xl bg-rose-500 px-4 text-sm font-black text-white disabled:opacity-60"
-            >
-              {isExpenseSaving ? "Saving…" : "Log Expense"}
-            </button>
-            <p className="text-center text-xs font-bold text-zinc-500">
-              Total logged expenses: {money(totalExpenses)}
-            </p>
-          </form>
-        </details>
-
-        <footer className="pt-4 text-center text-[9px] font-black tracking-[0.18em] text-zinc-600">
+        <footer className="pt-2 text-center text-[9px] font-black tracking-[0.18em] text-zinc-600">
           GLOWRUNNERS GATE CONTROL · ORGANISER ONLY
         </footer>
       </main>
+
 
       {isEventSettingsOpen ? (
         <div
@@ -3387,6 +3245,248 @@ export function GateControlDashboard() {
           </section>
         </div>
       ) : null}
+
+      {isWalkInModalOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="walk-in-modal-title"
+          className="fixed inset-0 z-50 flex items-end justify-center overflow-x-hidden bg-black/85 p-3 backdrop-blur-sm sm:items-center"
+        >
+          <form
+            onSubmit={handleWalkIn}
+            className="w-full max-w-md min-w-0 rounded-2xl border border-white/15 bg-[#141414] p-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2
+                  id="walk-in-modal-title"
+                  className="flex items-center gap-2 text-xl font-black text-orange-300"
+                >
+                  <span>+</span> Add Walk-In Runner
+                </h2>
+                <p className="mt-1 text-xs text-zinc-400">
+                  Register and check in an on-site runner
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsWalkInModalOpen(false)}
+                className="min-h-10 min-w-10 rounded-xl border border-white/10 text-lg text-zinc-400 transition-all hover:bg-white/10 hover:text-white active:scale-95"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mt-4 flex min-w-0 flex-col gap-3">
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                FULL NAME
+                <input
+                  value={walkInName}
+                  onChange={(event) => setWalkInName(event.target.value)}
+                  maxLength={100}
+                  required
+                  placeholder="Runner's full name"
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-orange-400"
+                />
+              </label>
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                PHONE NUMBER <span className="text-zinc-600">(OPTIONAL)</span>
+                <input
+                  value={walkInPhone}
+                  onChange={(event) => setWalkInPhone(event.target.value)}
+                  inputMode="tel"
+                  maxLength={24}
+                  placeholder="WhatsApp or phone"
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-orange-400"
+                />
+              </label>
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                PAYMENT METHOD
+                <select
+                  value={walkInMethod}
+                  onChange={(event) =>
+                    setWalkInMethod(
+                      event.target.value === "InstaPay" ? "InstaPay" : "Cash",
+                    )
+                  }
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white focus:border-orange-400"
+                >
+                  <option value="Cash">💵 Cash</option>
+                  <option value="InstaPay">📱 InstaPay / Vodafone Cash</option>
+                </select>
+              </label>
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                AMOUNT RECEIVED (EGP)
+                <input
+                  value={walkInAmount}
+                  onChange={(event) => setWalkInAmount(event.target.value)}
+                  type="number"
+                  inputMode="numeric"
+                  min={WALK_IN_FEE_EGP}
+                  max={1_000_000}
+                  step={1}
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-orange-400"
+                />
+              </label>
+              <div
+                aria-label="Quick walk-in cash amounts"
+                className="grid min-w-0 grid-cols-3 gap-2"
+              >
+                {[70, 100, 200].map((amount) => (
+                  <button
+                    key={amount}
+                    type="button"
+                    onClick={() => setWalkInAmount(String(amount))}
+                    className={`min-h-11 min-w-0 rounded-xl border px-2 text-xs font-black ${
+                      walkInReceivedAmount === amount
+                        ? "border-orange-300 bg-orange-400 text-black"
+                        : "border-white/10 bg-black text-zinc-300"
+                    }`}
+                  >
+                    {amount} EGP
+                  </button>
+                ))}
+              </div>
+              <p
+                role="status"
+                className={`rounded-xl border px-3 py-2 text-center text-xs font-black ${
+                  !hasValidWalkInAmount
+                    ? "border-amber-400/20 bg-amber-400/[0.08] text-amber-200"
+                    : walkInChange > 0
+                      ? "border-red-400/20 bg-red-400/[0.08] text-red-300"
+                      : "border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300"
+                }`}
+              >
+                {!hasValidWalkInAmount
+                  ? `Enter at least ${money(WALK_IN_FEE_EGP)}`
+                  : walkInChange > 0
+                    ? `🔴 RETURN CHANGE TO RUNNER: ${money(walkInChange)}`
+                    : "🟢 EXACT AMOUNT"}
+              </p>
+              <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsWalkInModalOpen(false)}
+                  className="min-h-12 rounded-xl border border-white/15 text-xs font-black text-zinc-300 transition-all hover:bg-white/5 active:scale-95"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isWalkInSaving || !hasValidWalkInAmount}
+                  className="min-h-12 rounded-xl bg-orange-500 px-3 text-xs font-black text-black transition-all disabled:opacity-60 active:scale-95"
+                >
+                  {isWalkInSaving
+                    ? "Saving…"
+                    : walkInChange > 0
+                      ? `Confirm & Return ${money(walkInChange)}`
+                      : `Confirm Walk-In (${money(WALK_IN_FEE_EGP)})`}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {isExpenseModalOpen ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="expense-modal-title"
+          className="fixed inset-0 z-50 flex items-end justify-center overflow-x-hidden bg-black/85 p-3 backdrop-blur-sm sm:items-center"
+        >
+          <form
+            onSubmit={handleExpense}
+            className="w-full max-w-md min-w-0 rounded-2xl border border-white/15 bg-[#141414] p-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2
+                  id="expense-modal-title"
+                  className="flex items-center gap-2 text-xl font-black text-rose-300"
+                >
+                  <span>💸</span> Log Event Expense
+                </h2>
+                <p className="mt-1 text-xs text-zinc-400">
+                  Record on-site purchases and operational costs
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsExpenseModalOpen(false)}
+                className="min-h-10 min-w-10 rounded-xl border border-white/10 text-lg text-zinc-400 transition-all hover:bg-white/10 hover:text-white active:scale-95"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mt-4 flex min-w-0 flex-col gap-3">
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                DESCRIPTION
+                <input
+                  value={expenseDescription}
+                  onChange={(event) =>
+                    setExpenseDescription(event.target.value)
+                  }
+                  maxLength={240}
+                  required
+                  placeholder="e.g. Water bottles, ice, supplies"
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-rose-400"
+                />
+              </label>
+              <div className="grid min-w-0 grid-cols-2 gap-2">
+                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                  AMOUNT (EGP)
+                  <input
+                    value={expenseAmount}
+                    onChange={(event) => setExpenseAmount(event.target.value)}
+                    inputMode="decimal"
+                    required
+                    placeholder="0"
+                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white outline-none focus:border-rose-400"
+                  />
+                </label>
+                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                  METHOD
+                  <select
+                    value={expenseMethod}
+                    onChange={(event) =>
+                      setExpenseMethod(
+                        event.target.value === "Digital" ? "Digital" : "Cash",
+                      )
+                    }
+                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white focus:border-rose-400"
+                  >
+                    <option value="Cash">💵 Cash</option>
+                    <option value="Digital">📱 Digital / Online</option>
+                  </select>
+                </label>
+              </div>
+              <p className="text-center text-xs font-bold text-zinc-500">
+                Total logged expenses: {money(totalExpenses)}
+              </p>
+              <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsExpenseModalOpen(false)}
+                  className="min-h-12 rounded-xl border border-white/15 text-xs font-black text-zinc-300 transition-all hover:bg-white/5 active:scale-95"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isExpenseSaving}
+                  className="min-h-12 rounded-xl bg-rose-500 px-4 text-xs font-black text-white transition-all disabled:opacity-60 active:scale-95"
+                >
+                  {isExpenseSaving ? "Saving…" : "Log Expense"}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 }
+
