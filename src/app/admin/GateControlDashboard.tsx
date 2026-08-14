@@ -714,9 +714,13 @@ export function GateControlDashboard() {
         force ? "/api/admin/stats?force=1" : "/api/admin/stats",
         {
           cache: "no-store",
-          headers: { "Cache-Control": "no-cache" },
+          headers: {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            Pragma: "no-cache",
+          },
         },
       );
+
       const payload = await readJson(response);
 
       if (handleUnauthorized(response)) {
@@ -1326,7 +1330,12 @@ export function GateControlDashboard() {
     try {
       const response = await fetch("/api/scan-ticket", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          Pragma: "no-cache",
+        },
+        cache: "no-store",
         body: JSON.stringify(item),
       });
       const payload = await readJson(response);
@@ -1432,7 +1441,12 @@ export function GateControlDashboard() {
         const response = hasValidEgyptianPhone
           ? await fetch("/api/scan-ticket", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                Pragma: "no-cache",
+              },
+              cache: "no-store",
               body: JSON.stringify({
                 operationId: crypto.randomUUID(),
                 phone: runner.phone,
@@ -1446,7 +1460,12 @@ export function GateControlDashboard() {
             })
           : await fetch("/api/admin/roster", {
               method: "PATCH",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                Pragma: "no-cache",
+              },
+              cache: "no-store",
               body: JSON.stringify({
                 rowIndex: runner.rowIndex,
                 expectedName: runner.name,
@@ -1459,6 +1478,7 @@ export function GateControlDashboard() {
                 balanceOwed: runner.balanceOwed,
               }),
             });
+
         const payload = await readJson(response);
 
         if (handleUnauthorized(response)) return false;
@@ -2077,8 +2097,9 @@ export function GateControlDashboard() {
     }
 
     setIsRunnerSaving(true);
+    const draft = runnerEditDraft;
     const previous = dashboard.roster.find(
-      (runner) => runner.rowIndex === runnerEditDraft.rowIndex,
+      (runner) => runner.rowIndex === draft.rowIndex,
     );
 
     if (!previous) {
@@ -2090,31 +2111,39 @@ export function GateControlDashboard() {
       return;
     }
 
-    const isFree = runnerEditDraft.status === "FREE";
+    const isFree = draft.status === "FREE";
+    const isConf = evaluateRunnerState({ status: draft.status }).isConfirmed;
     const optimistic: RosterEntry = {
       ...previous,
-      name: runnerEditDraft.name.trim(),
-      phone: runnerEditDraft.phone.trim(),
-      paymentType: runnerEditDraft.paymentType.trim(),
-      status: runnerEditDraft.status,
-      paymentStatus: runnerEditDraft.status,
-      checkedIn: evaluateRunnerState({ status: runnerEditDraft.status })
-        .isConfirmed,
-      amountPaid: isFree ? 0 : Math.max(0, Number(runnerEditDraft.amountPaid) || 0),
+      name: draft.name.trim(),
+      phone: draft.phone.trim(),
+      paymentType: draft.paymentType.trim(),
+      status: isConf ? "CONFIRMED" : draft.status,
+      paymentStatus: isConf ? "CONFIRMED" : draft.status,
+      checkedIn: isConf,
+      amountPaid: isFree ? 0 : Math.max(0, Number(draft.amountPaid) || 0),
       balanceOwed: isFree
         ? 0
-        : Math.max(0, Number(runnerEditDraft.balanceOwed) || 0),
+        : Math.max(0, Number(draft.balanceOwed) || 0),
     };
+    // 1. Instantly update local state
     replaceRunnerInDashboard(optimistic);
+    // 2. Close modal immediately for smooth UI
+    setRunnerEditDraft(null);
 
     try {
       const response = await fetch("/api/admin/roster", {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          Pragma: "no-cache",
+        },
+        cache: "no-store",
         body: JSON.stringify({
-          ...runnerEditDraft,
-          amountPaid: Number(runnerEditDraft.amountPaid),
-          balanceOwed: Number(runnerEditDraft.balanceOwed),
+          ...draft,
+          amountPaid: Number(draft.amountPaid),
+          balanceOwed: Number(draft.balanceOwed),
         }),
       });
       const payload = await readJson(response);
@@ -2133,11 +2162,12 @@ export function GateControlDashboard() {
       }
 
       replaceRunnerInDashboard(updated);
-      setRunnerEditDraft(null);
       setFeedback({
         tone: "success",
         message: `${updated.name} was updated.`,
       });
+      // 3. Silently re-sync with sheets in background
+      void refreshDashboard();
     } catch (error) {
       replaceRunnerInDashboard(previous);
       setFeedback({
@@ -2149,6 +2179,7 @@ export function GateControlDashboard() {
       setIsRunnerSaving(false);
     }
   };
+
 
   const deleteRunner = async () => {
     if (!runnerEditDraft || isRunnerSaving) {

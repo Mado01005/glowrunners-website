@@ -317,7 +317,9 @@ async function apiRequest(
   init?: RequestInit,
 ): Promise<{ response: Response; payload: unknown }> {
   const headers = new Headers(init?.headers);
-  headers.set("Cache-Control", "no-cache");
+  headers.set("Cache-Control", "no-cache, no-store, must-revalidate");
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
   const response = await fetch(input, {
     credentials: "same-origin",
     ...init,
@@ -325,6 +327,7 @@ async function apiRequest(
     headers,
   });
   const payload = await readJson(response);
+
 
   if (typeof window !== "undefined") {
     if (response.status === 401) {
@@ -2773,6 +2776,10 @@ export function PostRunEventsDashboard() {
                         return;
                       }
 
+                      // 1. Close modal immediately for smooth UI
+                      setSelectedParticipantId("");
+
+                      // 2. Perform optimistic update and sync
                       void updateParticipant(
                         selectedParticipant,
                         {
@@ -2788,10 +2795,13 @@ export function PostRunEventsDashboard() {
                           setParticipantContactDraft(updated.phoneNumber);
                           setPaymentDraft(String(updated.amountPaid));
                           setPaymentStatusDraft(updated.paymentStatus);
-                          setSelectedParticipantId("");
+                          if (selectedEvent) {
+                            void loadParticipants(selectedEvent.id, true);
+                          }
                         }
                       });
                     }}
+
                     className="flex min-w-0 flex-col gap-3 rounded-xl border border-zinc-800 bg-black p-3"
                   >
                   <label className="text-[10px] font-black uppercase tracking-wide text-zinc-400">

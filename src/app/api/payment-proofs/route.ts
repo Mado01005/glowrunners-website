@@ -4,11 +4,16 @@ import { getAdminSessionFromRequest } from "@/lib/adminAuth";
 import { listEventParticipants } from "@/lib/postRunEvents";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 export const runtime = "nodejs";
 
 const NO_STORE_HEADERS = {
-  "Cache-Control": "no-store",
+  "Cache-Control": "no-cache, no-store, must-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
 } as const;
+
 const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
 
 function isAllowedPrivateBlobUrl(value: string) {

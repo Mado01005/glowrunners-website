@@ -9,9 +9,15 @@ import {
 } from "@/lib/googleSheets";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 export const runtime = "nodejs";
 
-const NO_STORE_HEADERS = { "Cache-Control": "no-store" } as const;
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-cache, no-store, must-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
+} as const;
 const STATUS_VALUES = new Set([
   "CONFIRMED",
   "CLEARED",
@@ -40,7 +46,7 @@ function safeMoney(value: unknown): number {
 
 function storedStatus(value: string): string {
   if (["CONFIRMED", "CLEARED", "PAID"].includes(value)) {
-    return "✅ CONFIRMED";
+    return "TRUE";
   }
 
   if (value === "DEPOSIT_PAID") {
@@ -49,6 +55,7 @@ function storedStatus(value: string): string {
 
   return value;
 }
+
 
 export async function PATCH(request: Request) {
   const session = await getAdminSessionFromRequest(request);

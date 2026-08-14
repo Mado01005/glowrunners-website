@@ -8,9 +8,16 @@ import { invalidateGateDashboardCache } from "@/lib/gateDashboard";
 import { resolveActiveAttendanceSheetName } from "@/lib/googleSheets";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 export const runtime = "nodejs";
 
-const NO_STORE_HEADERS = { "Cache-Control": "no-store" } as const;
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-cache, no-store, must-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
+} as const;
+
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 

@@ -13,12 +13,19 @@ import {
 } from "@/lib/postRunEvents";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 export const runtime = "nodejs";
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const MAX_INLINE_BYTES = 32_000;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/;
-const NO_STORE_HEADERS = { "Cache-Control": "no-store" } as const;
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-cache, no-store, must-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
+} as const;
+
 
 function forbiddenResponse() {
   return NextResponse.json(

@@ -11,6 +11,8 @@ import {
 } from "@/lib/adminAuth";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 export const runtime = "nodejs";
 
 type LoginRequestBody = Readonly<{
@@ -19,8 +21,11 @@ type LoginRequestBody = Readonly<{
 }>;
 
 const NO_STORE_HEADERS = {
-  "Cache-Control": "no-store",
+  "Cache-Control": "no-cache, no-store, must-revalidate",
+  Pragma: "no-cache",
+  Expires: "0",
 } as const;
+
 const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1_000;
 const MAX_LOGIN_ATTEMPTS = 5;
 const MAX_TRACKED_LOGIN_KEYS = 5_000;

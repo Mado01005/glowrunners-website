@@ -17,8 +17,9 @@ import {
   listPostRunEvents,
 } from "@/lib/postRunEvents";
 
-const DASHBOARD_CACHE_TTL_MS = 8_000;
+const DASHBOARD_CACHE_TTL_MS = 0;
 const DASHBOARD_STALE_TTL_MS = 2 * 60_000;
+
 let dashboardCache:
   | { loadedAt: number; value: GateDashboardData }
   | undefined;
