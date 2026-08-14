@@ -1918,53 +1918,62 @@ export function GateControlDashboard() {
 
     const isPending = draft.status === "PENDING";
     const isFree = draft.status === "FREE";
-    const draftedPaid = Number(draft.amountPaid) || 0;
-    const draftedOwed = Number(draft.balanceOwed) || 0;
+    const isOwed = draft.status === "OWED";
+
+    const prevPaid = Number(previous.amountPaid) || 0;
+    const prevOwed = Number(previous.balanceOwed) || 0;
     const effectiveFee =
-      draftedOwed > 0 ? draftedOwed : draftedPaid > 0 ? draftedPaid : 70;
+      prevOwed > 0 ? prevOwed : prevPaid > 0 ? prevPaid : 70;
     const receivedCash = Number(draft.amountReceived) || 0;
 
-    // Settle balance if cash received >= effectiveFee or if status is set to CONFIRMED
-    const settlingCash =
-      !isFree && !isPending && (receivedCash >= effectiveFee || draftedPaid >= effectiveFee) && (receivedCash > 0 || draftedPaid > 0);
-    const finalPaid = isPending || isFree
-      ? 0
-      : settlingCash
-        ? Math.max(draftedPaid, effectiveFee)
-        : draft.status === "CONFIRMED"
-          ? draftedPaid > 0
-            ? draftedPaid
-            : effectiveFee
-          : draftedPaid;
-    const finalOwed =
-      isPending || isFree ? 0 : settlingCash || draft.status === "CONFIRMED" ? 0 : draftedOwed;
-    const isConf = !isPending && (draft.status === "CONFIRMED" || settlingCash || isFree);
-    const finalStatus: RunnerStatusDraft = isPending
-      ? "PENDING"
-      : isFree
-        ? "FREE"
-        : isConf
-          ? "CONFIRMED"
-          : draft.status;
+    let finalPaid = 0;
+    let finalOwed = 0;
+    let changeToReturn = 0;
+    let finalStatus: RunnerStatusDraft = draft.status;
+    let isConf = false;
+
+    if (isPending) {
+      finalPaid = 0;
+      finalOwed = 0;
+      changeToReturn = 0;
+      finalStatus = "PENDING";
+      isConf = false;
+    } else if (isFree) {
+      finalPaid = 0;
+      finalOwed = 0;
+      changeToReturn = 0;
+      finalStatus = "FREE";
+      isConf = true;
+    } else if (isOwed) {
+      finalPaid = 0;
+      finalOwed = effectiveFee;
+      changeToReturn = 0;
+      finalStatus = "OWED";
+      isConf = true;
+    } else {
+      // CONFIRMED / CLEARED
+      isConf = true;
+      finalStatus = "CONFIRMED";
+      finalPaid = effectiveFee;
+      finalOwed = 0;
+      changeToReturn =
+        receivedCash > effectiveFee
+          ? receivedCash - effectiveFee
+          : Number(previous.changeOwed) || 0;
+    }
 
     const cashDelta =
-      !isFree && !isPending && settlingCash
-        ? Math.max(0, finalPaid - (previous.amountPaid || 0))
+      !isFree && !isPending && (finalPaid > 0 || prevPaid > 0)
+        ? Math.max(0, finalPaid - prevPaid)
         : isPending
-          ? -Math.max(0, previous.amountPaid || 0)
+          ? -prevPaid
           : 0;
-
-    const changeToReturn =
-      !isPending && settlingCash && (receivedCash > 70 || draftedPaid > 70)
-        ? Math.max(0, (receivedCash || draftedPaid) - 70)
-        : 0;
-
 
     const optimistic: RosterEntry = {
       ...previous,
       name: draft.name.trim(),
       phone: draft.phone.trim(),
-      paymentType: draft.paymentType.trim(),
+      paymentType: draft.paymentType.trim() || "Cash",
       status: finalStatus,
       paymentStatus: finalStatus,
       checkedIn: isConf,
@@ -1972,6 +1981,7 @@ export function GateControlDashboard() {
       balanceOwed: Math.max(0, finalOwed),
       changeOwed: changeToReturn,
     };
+
 
 
     // 1. INSTANT LOCAL STATE & COUNTER MUTATION (<10ms)
@@ -2038,20 +2048,19 @@ export function GateControlDashboard() {
               runnerRow: draft.rowIndex,
               phone: draft.phone,
               runnerName: draft.name,
-              paymentMethod: settlingCash
-                ? "Cash"
-                : draft.paymentType === "Cash"
-                  ? "Cash"
-                  : "InstaPay",
+              paymentMethod:
+                draft.paymentType === "InstaPay" ||
+                draft.paymentType === "Vodafone Cash"
+                  ? "InstaPay"
+                  : "Cash",
               amountDue: effectiveFee,
-              amountReceived: settlingCash
-                ? finalPaid
-                : Number(draft.amountReceived) || 0,
-              changeOwed: 0,
+              amountReceived: finalPaid,
+              changeOwed: changeToReturn,
               createdAt: new Date().toISOString(),
             },
           ]);
         }
+
 
       }
     })();
@@ -2850,47 +2859,6 @@ export function GateControlDashboard() {
                   <option value="FREE">🎁 Free Attendee</option>
                 </select>
               </label>
-
-              <div className="grid min-w-0 grid-cols-2 gap-2">
-                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-400">
-                  AMOUNT PAID (EGP)
-                  <input
-                    type="number"
-                    min={0}
-                    max={1_000_000}
-                    step="0.01"
-                    disabled={runnerEditDraft.status === "FREE"}
-                    value={runnerEditDraft.amountPaid}
-                    onChange={(event) =>
-                      setRunnerEditDraft((current) =>
-                        current
-                          ? { ...current, amountPaid: event.target.value }
-                          : null,
-                      )
-                    }
-                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white disabled:opacity-50 focus:border-pink-400"
-                  />
-                </label>
-                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-400">
-                  BALANCE OWED (EGP)
-                  <input
-                    type="number"
-                    min={0}
-                    max={1_000_000}
-                    step="0.01"
-                    disabled={runnerEditDraft.status === "FREE"}
-                    value={runnerEditDraft.balanceOwed}
-                    onChange={(event) =>
-                      setRunnerEditDraft((current) =>
-                        current
-                          ? { ...current, balanceOwed: event.target.value }
-                          : null,
-                      )
-                    }
-                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white disabled:opacity-50 focus:border-pink-400"
-                  />
-                </label>
-              </div>
             </div>
 
             {runnerEditDraft.status !== "FREE" ? (
@@ -2912,7 +2880,6 @@ export function GateControlDashboard() {
                         ? {
                             ...current,
                             amountReceived: val,
-                            amountPaid: val ? val : current.amountPaid,
                           }
                         : null,
                     );
@@ -2930,7 +2897,7 @@ export function GateControlDashboard() {
                             ? {
                                 ...current,
                                 amountReceived: String(preset),
-                                amountPaid: String(preset),
+                                status: "CONFIRMED",
                               }
                             : null,
                         )
@@ -2945,13 +2912,16 @@ export function GateControlDashboard() {
                     onClick={() =>
                       setRunnerEditDraft((current) => {
                         if (!current) return null;
-                        const owed = Number(current.balanceOwed) || 0;
-                        const paid = Number(current.amountPaid) || 0;
+                        const previous = dashboard.roster.find(
+                          (r) => r.rowIndex === current.rowIndex,
+                        );
+                        const owed = Number(previous?.balanceOwed) || 0;
+                        const paid = Number(previous?.amountPaid) || 0;
                         const fee = owed > 0 ? owed : paid > 0 ? paid : 70;
                         return {
                           ...current,
                           amountReceived: String(fee),
-                          amountPaid: String(fee),
+                          status: "CONFIRMED",
                         };
                       })
                     }
@@ -2961,14 +2931,15 @@ export function GateControlDashboard() {
                   </button>
                 </div>
 
+
                 {(() => {
                   const currentRunner = dashboard.roster.find(
                     (r) => r.rowIndex === runnerEditDraft.rowIndex,
                   );
                   const currentPendingChange =
                     Number(currentRunner?.changeOwed) || 0;
-                  const owed = Number(runnerEditDraft.balanceOwed) || 0;
-                  const paid = Number(runnerEditDraft.amountPaid) || 0;
+                  const owed = Number(currentRunner?.balanceOwed) || 0;
+                  const paid = Number(currentRunner?.amountPaid) || 0;
                   const effectiveFee =
                     owed > 0 ? owed : paid > 0 ? paid : 70;
                   const received = Number(runnerEditDraft.amountReceived) || 0;
@@ -3002,7 +2973,7 @@ export function GateControlDashboard() {
                   if (received > 0 && received >= effectiveFee) {
                     return (
                       <p className="mt-2 text-center text-xs font-bold text-emerald-400">
-                        ✓ Balance will be settled to 0 EGP upon confirmation
+                        ✓ {effectiveFee} EGP ticket fee settled · 0 EGP balance
                       </p>
                     );
                   }
@@ -3017,8 +2988,8 @@ export function GateControlDashboard() {
               );
               const currentPendingChange =
                 Number(currentRunner?.changeOwed) || 0;
-              const owed = Number(runnerEditDraft.balanceOwed) || 0;
-              const paid = Number(runnerEditDraft.amountPaid) || 0;
+              const owed = Number(currentRunner?.balanceOwed) || 0;
+              const paid = Number(currentRunner?.amountPaid) || 0;
               const effectiveFee =
                 owed > 0 ? owed : paid > 0 ? paid : 70;
               const received = Number(runnerEditDraft.amountReceived) || 0;
@@ -3026,6 +2997,7 @@ export function GateControlDashboard() {
 
               return (
                 <div className="mt-4 flex flex-col gap-2">
+
                   {currentPendingChange > 0 ? (
                     <button
                       type="button"
