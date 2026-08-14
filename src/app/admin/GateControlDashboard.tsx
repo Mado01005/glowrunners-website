@@ -21,12 +21,14 @@ type RosterEntry = Readonly<{
   status: string;
   amountPaid: number;
   balanceOwed: number;
+  changeOwed?: number;
   paymentStatus: string;
   checkedIn: boolean;
   source: "attendance" | "walk-in" | "post-run";
   eventId?: string;
   participantId?: string;
 }>;
+
 
 type CameraOption = Readonly<{ id: string; label: string }>;
 
@@ -120,8 +122,8 @@ type WalkIn = Readonly<{
   createdAt: string;
 }>;
 
-type RosterFilter = "total" | "confirmed" | "pending" | "owed";
 type RunnerStatusDraft =
+
   | "CONFIRMED"
   | "DEPOSIT_PAID"
   | "PENDING"
@@ -278,7 +280,9 @@ function parseRoster(value: unknown): RosterEntry[] {
             : "",
         amountPaid: Math.max(0, Number(candidate.amountPaid) || 0),
         balanceOwed: Math.max(0, Number(candidate.balanceOwed) || 0),
+        changeOwed: Math.max(0, Number(candidate.changeOwed) || 0),
         paymentStatus:
+
           typeof candidate.paymentStatus === "string"
             ? candidate.paymentStatus.trim().slice(0, 40)
             : typeof candidate.status === "string"
@@ -591,9 +595,8 @@ export function GateControlDashboard() {
   });
   const [isRefreshing, setIsRefreshing] = useState(true);
   const [search, setSearch] = useState("");
-  const [rosterFilter, setRosterFilter] =
-    useState<RosterFilter>("total");
   const [locks, setLocks] = useState<RunnerLock[]>([]);
+
   const [paymentDraft, setPaymentDraft] = useState<PaymentDraft | null>(
     null,
   );
@@ -1515,14 +1518,7 @@ export function GateControlDashboard() {
     (sum, expense) => sum + Number(expense.amountEgp || 0),
     0,
   );
-  const {
-    computedCashInHand,
-    computedDigitalRevenue,
-    confirmedCount,
-    pendingCount,
-    totalCount,
-    runnerStateSummary,
-  } = useMemo(() => {
+  const topMetrics = useMemo(() => {
     let cash = 0;
     let digital = 0;
     let confirmed = 0;
@@ -1530,6 +1526,7 @@ export function GateControlDashboard() {
     let free = 0;
     let paid = 0;
     let balanceOwed = 0;
+    let totalChangeOwed = 0;
 
     effectiveRoster.forEach((runner) => {
       const state = evaluateRunnerState(runner);
@@ -1555,6 +1552,8 @@ export function GateControlDashboard() {
         paid += state.paid;
       }
 
+      totalChangeOwed += Number(runner.changeOwed) || 0;
+
       const isCash =
         !runner.paymentType ||
         runner.paymentType.toLowerCase().includes("cash") ||
@@ -1575,11 +1574,17 @@ export function GateControlDashboard() {
       .reduce((sum, e) => sum + Number(e.amountEgp || 0), 0);
 
     return {
-      computedCashInHand: Math.max(0, cash + queuedCash - cashExpenses),
-      computedDigitalRevenue: digital + queuedDigital,
       confirmedCount: confirmed,
       pendingCount: Math.max(0, effectiveRoster.length - confirmed),
       totalCount: effectiveRoster.length,
+      cashInHand: Math.max(0, cash + queuedCash - cashExpenses),
+      digitalRevenue: digital + queuedDigital,
+      balanceOwed,
+      changeOwed:
+        totalChangeOwed +
+        (dashboard.changeOwed || 0) +
+        queuedChange +
+        walkInChange,
       runnerStateSummary: {
         owed,
         free,
@@ -1587,14 +1592,24 @@ export function GateControlDashboard() {
         balanceOwed,
       },
     };
-  }, [effectiveRoster, expenses, queuedCash, queuedDigital]);
+  }, [
+    dashboard.changeOwed,
+    effectiveRoster,
+    expenses,
+    queuedCash,
+    queuedChange,
+    queuedDigital,
+    walkInChange,
+  ]);
 
-  const displayedConfirmed = confirmedCount;
-  const displayedTotal = totalCount;
-  const displayedPending = pendingCount;
-  const displayedCash = computedCashInHand;
-  const displayedDigital = computedDigitalRevenue;
-  const displayedChange = dashboard.changeOwed + queuedChange + walkInChange;
+  const displayedConfirmed = topMetrics.confirmedCount;
+  const displayedTotal = topMetrics.totalCount;
+  const displayedPending = topMetrics.pendingCount;
+  const displayedCash = topMetrics.cashInHand;
+  const displayedDigital = topMetrics.digitalRevenue;
+  const displayedChange = topMetrics.changeOwed;
+
+
 
   const postRunSignups = useMemo(
     () =>
@@ -1607,33 +1622,11 @@ export function GateControlDashboard() {
   );
 
 
-  const tabFilteredRoster = useMemo(
-    () =>
-      effectiveRoster.filter((runner) => {
-        const state = evaluateRunnerState(runner);
-
-        if (rosterFilter === "confirmed" && !state.isConfirmed) {
-          return false;
-        }
-
-        if (rosterFilter === "pending" && state.isConfirmed) {
-          return false;
-        }
-
-        if (rosterFilter === "owed" && !state.isOwed) {
-          return false;
-        }
-
-        return true;
-      }),
-    [effectiveRoster, rosterFilter],
-  );
-
   const filteredRoster = useMemo(() => {
     const query = search.trim().toLocaleLowerCase("en-US");
     const phoneQuery = normalizePhone(search);
 
-    return tabFilteredRoster
+    return effectiveRoster
       .filter(
         (runner) =>
           !query ||
@@ -1642,7 +1635,8 @@ export function GateControlDashboard() {
           (phoneQuery.length > 0 && runner.phone.includes(phoneQuery)),
       )
       .slice(0, 150);
-  }, [search, tabFilteredRoster]);
+  }, [effectiveRoster, search]);
+
 
   const lockByRow = useMemo(() => {
     const map = new Map<number, RunnerLock>();
@@ -1952,6 +1946,11 @@ export function GateControlDashboard() {
         ? Math.max(0, finalPaid - (previous.amountPaid || 0))
         : 0;
 
+    const changeToReturn =
+      settlingCash && receivedCash > effectiveFee
+        ? Math.max(0, receivedCash - effectiveFee)
+        : 0;
+
     const optimistic: RosterEntry = {
       ...previous,
       name: draft.name.trim(),
@@ -1962,7 +1961,9 @@ export function GateControlDashboard() {
       checkedIn: isConf,
       amountPaid: Math.max(0, finalPaid),
       balanceOwed: Math.max(0, finalOwed),
+      changeOwed: changeToReturn,
     };
+
 
     // 1. INSTANT LOCAL STATE & COUNTER MUTATION (<10ms)
     replaceRunnerInDashboard(optimistic, cashDelta);
@@ -2433,30 +2434,8 @@ export function GateControlDashboard() {
             </button>
           </div>
 
-          <div className="mt-2.5 grid min-w-0 grid-cols-4 gap-1.5">
-            {[
-              ["total", "👥 Total", displayedTotal],
-              ["confirmed", "🟢 Confirmed", displayedConfirmed],
-              ["pending", "🟡 Pending", displayedPending],
-              ["owed", "🔴 Owed", runnerStateSummary.owed],
-            ].map(([value, label, count]) => (
-              <button
-                key={String(value)}
-                type="button"
-                onClick={() => setRosterFilter(value as RosterFilter)}
-                className={`min-h-10 min-w-0 rounded-lg px-1 text-[9px] font-black active:scale-95 transition-all ${
-                  rosterFilter === value
-                    ? "bg-white text-black font-black"
-                    : "border border-white/10 bg-black/30 text-zinc-400"
-                }`}
-              >
-                {label} · {count}
-              </button>
-            ))}
-          </div>
-
-
           <div className="mt-3 flex min-w-0 flex-col gap-1.5">
+
             {filteredRoster.length === 0 ? (
               <div className="rounded-xl border border-dashed border-white/10 px-4 py-8 text-center text-sm text-zinc-500">
                 No runners match this view.
