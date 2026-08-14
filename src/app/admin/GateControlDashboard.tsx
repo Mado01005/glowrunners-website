@@ -137,7 +137,9 @@ type RunnerEditDraft = {
   status: RunnerStatusDraft;
   amountPaid: string;
   balanceOwed: string;
+  amountReceived: string;
 };
+
 type Feedback = Readonly<{
   tone: "idle" | "success" | "error";
   message: string;
@@ -613,8 +615,8 @@ export function GateControlDashboard() {
   const [selectedCameraId, setSelectedCameraId] = useState("");
   const [isScanSuccess, setIsScanSuccess] = useState(false);
   const [quickCheckIn, setQuickCheckIn] = useState("");
-  const [isQuickCheckingIn, setIsQuickCheckingIn] = useState(false);
   const [offlineQueue, setOfflineQueue] = useState<OfflineCheckIn[]>([]);
+
   const [activities, setActivities] = useState<Activity[]>([]);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isActivityLoading, setIsActivityLoading] = useState(false);
@@ -1426,111 +1428,65 @@ export function GateControlDashboard() {
     releaseLock,
   ]);
 
-  const quickConfirmRunner = useCallback(
-    async (runner: RosterEntry) => {
-      if (isConfirmed(runner)) {
-        setFeedback({
-          tone: "idle",
-          message: `${runner.name} is already confirmed.`,
-        });
-        return false;
-      }
+  const replaceRunnerInDashboard = useCallback((runner: RosterEntry) => {
+    setDashboard((current) => {
+      const roster = current.roster.map((candidate) =>
+        candidate.rowIndex === runner.rowIndex ? runner : candidate,
+      );
+      const counters = summarizeRosterCounters(roster);
 
-      if (runner.source !== "attendance") {
-        setFeedback({
-          tone: "error",
-          message: `${runner.name} is synced from ${
-            runner.source === "post-run" ? "Post-Run Events" : "the walk-in ledger"
-          } and cannot be checked into the Attendance sheet from this scanner.`,
-        });
-        return false;
-      }
-
-      const optimistic: RosterEntry = {
-        ...runner,
-        status: "CONFIRMED",
-        paymentStatus: "CONFIRMED",
-        checkedIn: true,
+      return {
+        ...current,
+        roster,
+        confirmed: counters.confirmed,
+        pending: counters.pending,
+        total: counters.total,
       };
-      replaceRunnerInDashboard(optimistic);
-      setIsQuickCheckingIn(true);
+    });
+  }, []);
 
-      try {
-        const phone = normalizePhone(runner.phone);
-        const hasValidEgyptianPhone = /^(?:10|11|12|15)\d{8}$/.test(phone);
-        const response = hasValidEgyptianPhone
-          ? await fetch("/api/scan-ticket", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                Pragma: "no-cache",
-              },
-              cache: "no-store",
-              body: JSON.stringify({
-                operationId: crypto.randomUUID(),
-                phone: runner.phone,
-                runnerName: runner.name,
-                runnerRow: runner.rowIndex,
-                paymentMethod: runner.paymentType,
-                amountDue: 0,
-                amountReceived: 0,
-                changeOwed: 0,
-              }),
-            })
-          : await fetch("/api/admin/roster", {
-              method: "PATCH",
-              headers: {
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                Pragma: "no-cache",
-              },
-              cache: "no-store",
-              body: JSON.stringify({
-                rowIndex: runner.rowIndex,
-                expectedName: runner.name,
-                expectedPhone: runner.phone,
-                name: runner.name,
-                phone: runner.phone,
-                paymentType: runner.paymentType,
-                status: "CONFIRMED",
-                amountPaid: runner.amountPaid,
-                balanceOwed: runner.balanceOwed,
-              }),
-            });
+  const closeRunnerEditor = useCallback(() => {
+    setRunnerEditDraft(null);
+    try {
+      scannerRef.current?.resume();
+    } catch {
+      // ignore
+    }
+  }, []);
 
-        const payload = await readJson(response);
+  const openRunnerEditor = useCallback((runner: RosterEntry) => {
+    if (runner.source !== "attendance") {
+      setFeedback({
+        tone: "idle",
+        message:
+          runner.source === "post-run"
+            ? `${runner.name} is synced from Post-Run Events. Edit this runner from the Post-Run Events dashboard.`
+            : `${runner.name} is stored in the walk-in ledger.`,
+      });
+      return;
+    }
 
-        if (handleUnauthorized(response)) return false;
-        if (!response.ok) {
-          throw new Error(readError(payload, "Unable to check in this runner."));
-        }
+    try {
+      scannerRef.current?.pause(true);
+    } catch {
+      // ignore
+    }
 
-        if (isRecord(payload) && isRecord(payload.runner)) {
-          const authoritative = parseRoster([payload.runner])[0];
-          if (authoritative) replaceRunnerInDashboard(authoritative);
-        }
+    setRunnerEditDraft({
+      rowIndex: runner.rowIndex,
+      expectedName: runner.name,
+      expectedPhone: runner.phone,
+      name: runner.name,
+      phone: runner.phone,
+      paymentType: runner.paymentType,
+      status: runnerStatusDraft(runner.status),
+      amountPaid: String(runner.amountPaid),
+      balanceOwed: String(runner.balanceOwed),
+      amountReceived: runner.balanceOwed > 0 ? String(runner.balanceOwed) : "",
+    });
+  }, []);
 
-        playScanSuccessBeep();
-        setIsScanSuccess(true);
-        window.setTimeout(() => setIsScanSuccess(false), 1_000);
-        setFeedback({ tone: "success", message: `${runner.name} is checked in.` });
-        void loadActivity();
-        return true;
-      } catch (error) {
-        replaceRunnerInDashboard(runner);
-        setFeedback({
-          tone: "error",
-          message:
-            error instanceof Error ? error.message : "Unable to check in this runner.",
-        });
-        return false;
-      } finally {
-        setIsQuickCheckingIn(false);
-      }
-    },
-    [handleUnauthorized, loadActivity],
-  );
+
 
   useEffect(() => {
     scanHandlerRef.current = (decoded: string) => {
@@ -1555,22 +1511,22 @@ export function GateControlDashboard() {
         return;
       }
 
+      // Immediately pause camera scanning
       try {
         scannerRef.current?.pause(true);
       } catch {
         // Duplicate protection still applies if this browser cannot pause video.
       }
-      if (scanResumeTimerRef.current) window.clearTimeout(scanResumeTimerRef.current);
-      scanResumeTimerRef.current = window.setTimeout(() => {
-        try {
-          scannerRef.current?.resume();
-        } catch {
-          // Scanner may have been stopped or switched while throttled.
-        }
-      }, 1_500);
-      void quickConfirmRunner(runner);
+
+      playScanSuccessBeep();
+      setIsScanSuccess(true);
+      window.setTimeout(() => setIsScanSuccess(false), 800);
+
+      // Open Runner Settlement & Edit Pop-Up Modal
+      openRunnerEditor(runner);
     };
-  }, [dashboard.roster, quickConfirmRunner]);
+  }, [dashboard.roster, openRunnerEditor]);
+
 
   useEffect(() => {
     if (!isScannerEnabled) {
@@ -1659,7 +1615,8 @@ export function GateControlDashboard() {
   const submitQuickCheckIn = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const lookup = quickCheckIn.trim();
-    if (!lookup || isQuickCheckingIn) return;
+    if (!lookup) return;
+
 
     const runner = findRunnerFromQrPayload(dashboard.roster, lookup);
     if (!runner) {
@@ -1670,9 +1627,10 @@ export function GateControlDashboard() {
       return;
     }
 
-    const succeeded = await quickConfirmRunner(runner);
-    if (succeeded) setQuickCheckIn("");
+    setQuickCheckIn("");
+    openRunnerEditor(runner);
   };
+
 
   const walkInReceivedAmount = Number(walkInAmount);
   const hasValidWalkInAmount =
@@ -2067,49 +2025,8 @@ export function GateControlDashboard() {
     }
   };
 
-  const openRunnerEditor = (runner: RosterEntry) => {
-    if (runner.source !== "attendance") {
-      setFeedback({
-        tone: "idle",
-        message:
-          runner.source === "post-run"
-            ? `${runner.name} is synced from Post-Run Events. Edit this runner from the Post-Run Events dashboard.`
-            : `${runner.name} is stored in the walk-in ledger.`,
-      });
-      return;
-    }
-
-    setRunnerEditDraft({
-      rowIndex: runner.rowIndex,
-      expectedName: runner.name,
-      expectedPhone: runner.phone,
-      name: runner.name,
-      phone: runner.phone,
-      paymentType: runner.paymentType,
-      status: runnerStatusDraft(runner.status),
-      amountPaid: String(runner.amountPaid),
-      balanceOwed: String(runner.balanceOwed),
-    });
-  };
-
-  const replaceRunnerInDashboard = (runner: RosterEntry) => {
-    setDashboard((current) => {
-      const roster = current.roster.map((candidate) =>
-        candidate.rowIndex === runner.rowIndex ? runner : candidate,
-      );
-      const counters = summarizeRosterCounters(roster);
-
-      return {
-        ...current,
-        roster,
-        confirmed: counters.confirmed,
-        pending: counters.pending,
-        total: counters.total,
-      };
-    });
-  };
-
   const saveRunner = async (event: FormEvent<HTMLFormElement>) => {
+
     event.preventDefault();
 
     if (!runnerEditDraft || isRunnerSaving) {
@@ -2132,24 +2049,33 @@ export function GateControlDashboard() {
     }
 
     const isFree = draft.status === "FREE";
-    const isConf = evaluateRunnerState({ status: draft.status }).isConfirmed;
+    const draftedPaid = Number(draft.amountPaid) || 0;
+    const draftedOwed = Number(draft.balanceOwed) || 0;
+    const receivedCash = Number(draft.amountReceived) || 0;
+
+    // Settle balance if cash received >= balance owed or if status is set to CONFIRMED
+    const settlingCash = !isFree && receivedCash >= draftedOwed && draftedOwed > 0;
+    const finalPaid = isFree ? 0 : settlingCash ? draftedPaid + draftedOwed : draftedPaid;
+    const finalOwed = isFree ? 0 : settlingCash ? 0 : draftedOwed;
+    const isConf = draft.status === "CONFIRMED" || settlingCash || isFree;
+    const finalStatus: RunnerStatusDraft = isFree ? "FREE" : isConf ? "CONFIRMED" : draft.status;
+
     const optimistic: RosterEntry = {
       ...previous,
       name: draft.name.trim(),
       phone: draft.phone.trim(),
       paymentType: draft.paymentType.trim(),
-      status: isConf ? "CONFIRMED" : draft.status,
-      paymentStatus: isConf ? "CONFIRMED" : draft.status,
+      status: finalStatus,
+      paymentStatus: finalStatus,
       checkedIn: isConf,
-      amountPaid: isFree ? 0 : Math.max(0, Number(draft.amountPaid) || 0),
-      balanceOwed: isFree
-        ? 0
-        : Math.max(0, Number(draft.balanceOwed) || 0),
+      amountPaid: Math.max(0, finalPaid),
+      balanceOwed: Math.max(0, finalOwed),
     };
+
     // 1. Instantly update local state
     replaceRunnerInDashboard(optimistic);
-    // 2. Close modal immediately for smooth UI
-    setRunnerEditDraft(null);
+    // 2. Close modal immediately and resume camera scanning
+    closeRunnerEditor();
 
     try {
       const response = await fetch("/api/admin/roster", {
@@ -2162,8 +2088,9 @@ export function GateControlDashboard() {
         cache: "no-store",
         body: JSON.stringify({
           ...draft,
-          amountPaid: Number(draft.amountPaid),
-          balanceOwed: Number(draft.balanceOwed),
+          status: finalStatus,
+          amountPaid: Math.max(0, finalPaid),
+          balanceOwed: Math.max(0, finalOwed),
         }),
       });
       const payload = await readJson(response);
@@ -2184,8 +2111,9 @@ export function GateControlDashboard() {
       replaceRunnerInDashboard(updated);
       setFeedback({
         tone: "success",
-        message: `${updated.name} was updated.`,
+        message: `${updated.name} was confirmed & updated.`,
       });
+      void loadActivity();
       // 3. Silently re-sync with sheets in background
       void refreshDashboard();
     } catch (error) {
@@ -2200,14 +2128,14 @@ export function GateControlDashboard() {
     }
   };
 
-
   const deleteRunner = async () => {
     if (!runnerEditDraft || isRunnerSaving) {
       return;
     }
 
+    const draft = runnerEditDraft;
     const confirmed = window.confirm(
-      `Are you sure you want to permanently remove ${runnerEditDraft.name} from this event?`,
+      `Are you sure you want to permanently remove ${draft.name} from this event?`,
     );
 
     if (!confirmed) {
@@ -2215,15 +2143,21 @@ export function GateControlDashboard() {
     }
 
     setIsRunnerSaving(true);
+    closeRunnerEditor();
 
     try {
       const response = await fetch("/api/admin/roster", {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          Pragma: "no-cache",
+        },
+        cache: "no-store",
         body: JSON.stringify({
-          rowIndex: runnerEditDraft.rowIndex,
-          expectedName: runnerEditDraft.expectedName,
-          expectedPhone: runnerEditDraft.expectedPhone,
+          rowIndex: draft.rowIndex,
+          expectedName: draft.name,
+          expectedPhone: draft.phone,
         }),
       });
       const payload = await readJson(response);
@@ -2236,7 +2170,8 @@ export function GateControlDashboard() {
         throw new Error(readError(payload, "Unable to delete runner."));
       }
 
-      const deletedRow = runnerEditDraft.rowIndex;
+      const deletedRow = draft.rowIndex;
+
       setDashboard((current) => {
         const roster = current.roster
           .filter((runner) => runner.rowIndex !== deletedRow)
@@ -2564,18 +2499,18 @@ export function GateControlDashboard() {
                 onChange={(event) => setQuickCheckIn(event.target.value)}
                 placeholder="Phone, @username, exact name, or ticket ID"
                 autoComplete="off"
-                disabled={isQuickCheckingIn}
-                className="min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-400 disabled:opacity-60"
+                className="min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-emerald-400"
               />
             </label>
             <button
               type="submit"
-              disabled={!quickCheckIn.trim() || isQuickCheckingIn}
-              className="mt-2 min-h-11 w-full rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 text-sm font-black text-emerald-300 disabled:opacity-40"
+              disabled={!quickCheckIn.trim()}
+              className="mt-2 min-h-11 w-full rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-4 text-sm font-black text-emerald-300 disabled:opacity-40 hover:bg-emerald-500/20 active:scale-95 transition-all"
             >
-              {isQuickCheckingIn ? "Checking In…" : "⚡ Check In Now"}
+              ⚡ Review & Confirm
             </button>
           </form>
+
         </section>
 
         <section className="min-w-0 rounded-2xl border border-white/10 bg-[#151515] p-3">
@@ -3079,24 +3014,30 @@ export function GateControlDashboard() {
           >
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <h2 id="runner-edit-title" className="text-xl font-black">
-                  Edit Runner
+                <h2 id="runner-edit-title" className="text-xl font-black text-white flex items-center gap-2">
+                  <span>💸</span> Runner Settlement & Edit
                 </h2>
-                <p className="mt-1 text-xs text-zinc-500">
-                  Attendance row {runnerEditDraft.rowIndex}
+                <p className="mt-1 text-xs font-semibold text-zinc-400">
+                  Attendance Row {runnerEditDraft.rowIndex} · {runnerEditDraft.paymentType || "Regular"}
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setRunnerEditDraft(null)}
-                className="min-h-11 min-w-11 rounded-xl border border-white/10 text-lg"
-                aria-label="Close runner editor"
+                onClick={closeRunnerEditor}
+                className="min-h-11 min-w-11 rounded-xl border border-white/10 text-lg hover:bg-white/10 active:scale-95 transition-all text-zinc-400 hover:text-white"
+                aria-label="Close runner settlement"
               >
                 ×
               </button>
             </div>
+
+            <div className="mt-3 rounded-xl border border-white/10 bg-black/60 p-3">
+              <p className="truncate text-base font-black text-white">{runnerEditDraft.name}</p>
+              <p className="mt-0.5 text-xs text-zinc-400">{runnerEditDraft.phone || "No contact recorded"}</p>
+            </div>
+
             <div className="mt-4 flex min-w-0 flex-col gap-3">
-              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
                 FULL NAME
                 <input
                   required
@@ -3110,7 +3051,7 @@ export function GateControlDashboard() {
                   className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-pink-400"
                 />
               </label>
-              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
                 WHATSAPP PHONE OR @HANDLE
                 <input
                   maxLength={80}
@@ -3123,7 +3064,7 @@ export function GateControlDashboard() {
                   className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white outline-none focus:border-pink-400"
                 />
               </label>
-              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-500">
+              <label className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
                 PAYMENT / GATE STATUS
                 <select
                   value={runnerEditDraft.status}
@@ -3135,24 +3076,26 @@ export function GateControlDashboard() {
                             ...current,
                             status,
                             ...(status === "FREE"
-                              ? { amountPaid: "0", balanceOwed: "0" }
-                              : {}),
+                              ? { amountPaid: "0", balanceOwed: "0", amountReceived: "" }
+                              : status === "CONFIRMED"
+                                ? { balanceOwed: "0" }
+                                : {}),
                           }
                         : null,
                     );
                   }}
-                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white"
+                  className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-sm text-white focus:border-pink-400"
                 >
-                  <option value="CONFIRMED">Confirmed / Cleared</option>
-                  <option value="DEPOSIT_PAID">Pending / Deposit Paid</option>
-                  <option value="PENDING">Pending / Unpaid</option>
-                  <option value="OWED">Owed</option>
-                  <option value="FREE">Free</option>
+                  <option value="CONFIRMED">✅ Confirmed / Cleared</option>
+                  <option value="DEPOSIT_PAID">⏳ Pending / Deposit Paid</option>
+                  <option value="PENDING">⏳ Pending / Unpaid</option>
+                  <option value="OWED">⚠️ Owed</option>
+                  <option value="FREE">🎁 Free Attendee</option>
                 </select>
               </label>
               <div className="grid min-w-0 grid-cols-2 gap-2">
-                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-500">
-                  AMOUNT PAID
+                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                  AMOUNT PAID (EGP)
                   <input
                     type="number"
                     min={0}
@@ -3167,11 +3110,11 @@ export function GateControlDashboard() {
                           : null,
                       )
                     }
-                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white disabled:opacity-50"
+                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white disabled:opacity-50 focus:border-pink-400"
                   />
                 </label>
-                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-500">
-                  BALANCE OWED
+                <label className="min-w-0 text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                  BALANCE OWED (EGP)
                   <input
                     type="number"
                     min={0}
@@ -3186,39 +3129,119 @@ export function GateControlDashboard() {
                           : null,
                       )
                     }
-                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white disabled:opacity-50"
+                    className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-3 text-sm text-white disabled:opacity-50 focus:border-pink-400"
                   />
                 </label>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => void deleteRunner()}
-              disabled={isRunnerSaving}
-              className="mt-4 min-h-12 w-full rounded-xl border border-red-400/30 bg-red-500/10 px-4 text-sm font-black text-red-300 disabled:opacity-60"
-            >
-              🗑️ Delete Runner
-            </button>
-            <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setRunnerEditDraft(null)}
-                disabled={isRunnerSaving}
-                className="min-h-12 rounded-xl border border-white/15 text-sm font-black text-zinc-300"
-              >
-                Cancel
-              </button>
+
+            {runnerEditDraft.status !== "FREE" ? (
+              <div className="mt-4 rounded-xl border border-white/15 bg-white/[0.03] p-3">
+                <p className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                  ON-SITE CASH RECEIVED (EGP)
+                </p>
+                <input
+                  type="number"
+                  min={0}
+                  max={1_000_000}
+                  step="1"
+                  placeholder="0"
+                  value={runnerEditDraft.amountReceived}
+                  onChange={(event) =>
+                    setRunnerEditDraft((current) =>
+                      current ? { ...current, amountReceived: event.target.value } : null,
+                    )
+                  }
+                  className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-white/10 bg-black px-4 text-base font-black text-white outline-none focus:border-emerald-400"
+                />
+                <div className="mt-2 grid grid-cols-4 gap-1.5">
+                  {[70, 100, 200].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() =>
+                        setRunnerEditDraft((current) =>
+                          current ? { ...current, amountReceived: String(preset) } : null,
+                        )
+                      }
+                      className="min-h-10 rounded-lg border border-white/10 bg-white/5 text-xs font-black text-zinc-200 hover:bg-white/10 active:scale-95 transition-all"
+                    >
+                      {preset} EGP
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setRunnerEditDraft((current) =>
+                        current
+                          ? { ...current, amountReceived: String(Math.max(0, Number(current.balanceOwed) || 0)) }
+                          : null,
+                      )
+                    }
+                    className="min-h-10 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs font-black text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition-all"
+                  >
+                    EXACT
+                  </button>
+                </div>
+                {(() => {
+                  const owed = Number(runnerEditDraft.balanceOwed) || 0;
+                  const received = Number(runnerEditDraft.amountReceived) || 0;
+                  const change = Math.max(0, received - owed);
+                  if (received > 0 && change > 0) {
+                    return (
+                      <div className="mt-3 rounded-xl border border-emerald-500/40 bg-emerald-500/15 p-3 text-center">
+                        <p className="text-[10px] font-black uppercase tracking-wide text-emerald-400">
+                          💵 Change to return
+                        </p>
+                        <p className="mt-0.5 text-xl font-black text-emerald-300">
+                          Give {change} EGP change to runner
+                        </p>
+                      </div>
+                    );
+                  }
+                  if (received > 0 && owed > 0 && received >= owed) {
+                    return (
+                      <p className="mt-2 text-center text-xs font-bold text-emerald-400">
+                        ✓ Balance will be settled to 0 EGP upon confirmation
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+            ) : null}
+
+            <div className="mt-4 flex flex-col gap-2">
               <button
                 type="submit"
                 disabled={isRunnerSaving}
-                className="min-h-12 rounded-xl bg-pink-500 px-3 text-sm font-black text-white disabled:opacity-60"
+                className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all disabled:opacity-60"
               >
-                {isRunnerSaving ? "Saving…" : "Save Runner"}
+                {isRunnerSaving ? "Saving & Confirming…" : "✓ Save & Confirm Runner"}
               </button>
+              <div className="grid min-w-0 grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={closeRunnerEditor}
+                  disabled={isRunnerSaving}
+                  className="min-h-11 rounded-xl border border-white/15 text-xs font-black text-zinc-300 hover:bg-white/5 active:scale-95 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void deleteRunner()}
+                  disabled={isRunnerSaving}
+                  className="min-h-11 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-xs font-black text-red-300 hover:bg-red-500/20 active:scale-95 transition-all disabled:opacity-60"
+                >
+                  🗑️ Delete Runner
+                </button>
+              </div>
             </div>
           </form>
         </div>
       ) : null}
+
 
       {paymentDraft ? (
         <div
