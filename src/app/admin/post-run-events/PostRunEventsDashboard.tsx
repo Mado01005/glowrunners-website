@@ -2545,16 +2545,16 @@ export function PostRunEventsDashboard() {
                             );
                             setDraggingParticipantId("");
                           }}
-                          className={`grid min-h-16 min-w-0 grid-cols-[44px_minmax(0,1fr)_76px] border-b border-zinc-800 last:border-b-0 ${
+                          className={`flex h-12 min-w-0 items-center justify-between gap-1.5 border-b border-zinc-800 px-2 py-1 last:border-b-0 ${
                             draggingParticipantId === participant.id
                               ? "bg-zinc-900 opacity-70"
-                              : "bg-zinc-950"
-                          }`}
+                              : "bg-zinc-950 hover:bg-zinc-900/40"
+                          } transition-colors`}
                         >
                           <button
                             type="button"
                             draggable
-                            aria-label={`Reorder ${participant.fullName}. Use drag or the up and down arrow keys.`}
+                            aria-label={`Reorder ${participant.fullName}.`}
                             title={`Reorder ${participant.fullName}`}
                             onClick={(event) => event.stopPropagation()}
                             onPointerDown={(event) => {
@@ -2602,44 +2602,47 @@ export function PostRunEventsDashboard() {
                                 event.key === "ArrowUp" ? -1 : 1,
                               );
                             }}
-                            className="flex min-h-11 w-11 touch-none cursor-grab select-none items-center justify-center border-r border-zinc-800 text-sm font-black tracking-[-0.2em] text-zinc-500 outline-none active:cursor-grabbing focus:bg-zinc-900 focus:text-white"
+                            className="flex h-8 w-6 shrink-0 touch-none cursor-grab select-none items-center justify-center text-xs font-black tracking-[-0.2em] text-zinc-600 outline-none active:cursor-grabbing hover:text-white"
                           >
                             ⋮⋮
                           </button>
                           <button
                             type="button"
                             onClick={() => handleOpenEditModal(participant)}
-                            className="grid h-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 px-2 text-left outline-none focus:bg-zinc-900"
+                            className="flex min-w-0 flex-1 flex-col text-left outline-none"
                             aria-label={`Edit ${participant.fullName}`}
                           >
-                            <span className="min-w-0">
-                              <span className="block truncate text-[11px] font-black leading-tight">
-                                {participant.fullName}
-                              </span>
-                              <span className="block truncate text-[9px] font-bold tabular-nums text-zinc-500">
-                                {participant.phoneNumber || "No contact provided"}
-                              </span>
+                            <span className="block truncate text-xs font-black text-white leading-tight">
+                              {participant.fullName}
                             </span>
-                            <span
-                              className={`max-w-[118px] truncate rounded-full px-1.5 py-1 text-[8px] font-black ${
-                                state.kind === "unpaid"
-                                  ? "bg-red-950 text-red-300"
-                                  : state.kind === "deposit"
-                                    ? "bg-amber-950 text-amber-200"
-                                    : state.kind === "free"
-                                      ? "bg-sky-950 text-sky-200"
-                                      : "bg-emerald-950 text-emerald-300"
-                              }`}
-                            >
-                              {state.label}
+                            <span className="block truncate text-[10px] font-bold tabular-nums text-zinc-400">
+                              {participant.phoneNumber || "No contact"}
                             </span>
                           </button>
-                          <div className="flex h-full min-w-0 flex-col items-stretch justify-center gap-1 border-l border-zinc-800 px-1">
-                            <span className="truncate text-center text-[8px] font-black tabular-nums text-amber-300">
+
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[9px] font-black whitespace-nowrap ${
+                                isCleared
+                                  ? "bg-emerald-950/90 text-emerald-300 border border-emerald-800/50"
+                                  : state.kind === "free"
+                                    ? "bg-sky-950/90 text-sky-300 border border-sky-800/50"
+                                    : state.kind === "deposit"
+                                      ? "bg-amber-950/90 text-amber-200 border border-amber-800/50"
+                                      : state.remaining > 0
+                                        ? "bg-rose-950/90 text-rose-300 border border-rose-800/50"
+                                        : "bg-zinc-900 text-zinc-400 border border-white/10"
+                              }`}
+                            >
                               {isCleared
-                                ? "0 owed"
-                                : `${formatCompactMoney(state.remaining)} owed`}
+                                ? "🟢 Cleared"
+                                : state.kind === "free"
+                                  ? "🎁 Free"
+                                  : state.remaining > 0
+                                    ? `🟡 Owed ${formatCompactMoney(state.remaining)}`
+                                    : "⚪ Unpaid"}
                             </span>
+
                             <button
                               type="button"
                               disabled={
@@ -2652,7 +2655,11 @@ export function PostRunEventsDashboard() {
                                 event.stopPropagation();
                                 void clearParticipant(participant);
                               }}
-                              className="min-h-11 rounded-md bg-emerald-400 px-1 text-[10px] font-black text-black disabled:bg-emerald-950 disabled:text-emerald-400"
+                              className={`h-8 min-w-12 shrink-0 rounded-lg px-2 text-[10px] font-black active:scale-95 transition-all ${
+                                isCleared
+                                  ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                                  : "bg-emerald-400 text-black hover:bg-emerald-300 shadow-md"
+                              } disabled:opacity-50`}
                             >
                               {isBusy ? "…" : isCleared ? "✓" : "Clear"}
                             </button>
@@ -2662,6 +2669,7 @@ export function PostRunEventsDashboard() {
                     })}
                   </div>
                 )}
+
               </>
             ) : null}
           </>
@@ -3015,42 +3023,85 @@ export function PostRunEventsDashboard() {
                   </form>
                 ) : null}
 
-                <div className="grid min-w-0 grid-cols-2 gap-2">
+                <div className="mt-3 flex flex-col gap-2">
+                  <p className="text-[10px] font-black tracking-[0.12em] text-zinc-400">
+                    PAYMENT PROOF (INSTAPAY / VODAFONE CASH / SCREENSHOT)
+                  </p>
+
+                  {selectedParticipant.paymentProofUrl ? (
+                    <div className="flex items-center gap-3 rounded-xl border border-fuchsia-800/40 bg-fuchsia-950/20 p-2.5">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={selectedParticipant.paymentProofUrl}
+                        alt="Payment proof thumbnail"
+                        className="h-12 w-12 rounded-lg border border-fuchsia-700/50 object-cover"
+                      />
+
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-xs font-black text-fuchsia-200">
+                          Payment Proof Attached
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setLightboxUrl(selectedParticipant.paymentProofUrl)
+                          }
+                          className="mt-0.5 text-[11px] font-bold text-fuchsia-400 underline hover:text-fuchsia-300"
+                        >
+                          View Full Screenshot
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
                   {isSelectedEventArchived ? (
-                    <div className="flex min-h-12 min-w-0 items-center justify-center rounded-xl border border-zinc-800 px-3 text-center text-xs font-black text-zinc-500">
-                      Read-only proof
+                    <div className="flex min-h-11 min-w-0 items-center justify-center rounded-xl border border-zinc-800 px-3 text-center text-xs font-black text-zinc-500">
+                      Read-only proof (Archived)
                     </div>
                   ) : (
-                    <label className="flex min-h-12 min-w-0 cursor-pointer items-center justify-center rounded-xl border border-zinc-700 px-3 text-center text-xs font-black">
-                      {busyKey === `proof:${selectedParticipant.id}`
-                        ? "Compressing…"
-                        : selectedParticipant.paymentProofUrl
-                          ? "Replace Proof"
-                          : "Upload Proof"}
-                      <input
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        className="sr-only"
-                        disabled={isAnyBusy}
-                        onChange={(event) =>
-                          void uploadProof(selectedParticipant, event)
-                        }
-                      />
-                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="flex min-h-11 cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-pink-500/40 bg-pink-500/10 px-3 text-center text-xs font-black text-pink-300 hover:bg-pink-500/20 active:scale-95 transition-all">
+                        <span>📷</span>
+                        <span>
+                          {busyKey === `proof:${selectedParticipant.id}`
+                            ? "Saving…"
+                            : "Snap Live Photo"}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          id="liveCameraInput"
+                          className="sr-only"
+                          disabled={isAnyBusy}
+                          onChange={(event) =>
+                            void uploadProof(selectedParticipant, event)
+                          }
+                        />
+                      </label>
+
+                      <label className="flex min-h-11 cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-white/5 px-3 text-center text-xs font-black text-zinc-300 hover:bg-white/10 active:scale-95 transition-all">
+                        <span>📁</span>
+                        <span>
+                          {busyKey === `proof:${selectedParticipant.id}`
+                            ? "Saving…"
+                            : "From Gallery"}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,image/*"
+                          id="galleryProofInput"
+                          className="sr-only"
+                          disabled={isAnyBusy}
+                          onChange={(event) =>
+                            void uploadProof(selectedParticipant, event)
+                          }
+                        />
+                      </label>
+                    </div>
                   )}
-                  <button
-                    type="button"
-                    disabled={!selectedParticipant.paymentProofUrl}
-                    onClick={() =>
-                      setLightboxUrl(selectedParticipant.paymentProofUrl)
-                    }
-                    className="min-h-12 min-w-0 rounded-xl border border-fuchsia-700 bg-fuchsia-950/40 px-3 text-xs font-black text-fuchsia-200 disabled:border-zinc-800 disabled:text-zinc-600"
-                  >
-                    {selectedParticipant.paymentProofUrl
-                      ? "View Screenshot"
-                      : "No Screenshot"}
-                  </button>
                 </div>
+
 
                 {directWhatsappPhone ? (
                   <div className="grid min-w-0 grid-cols-3 gap-2">

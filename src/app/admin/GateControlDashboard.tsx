@@ -241,15 +241,7 @@ function runnerStatusDraft(status: string): RunnerStatusDraft {
   return "PENDING";
 }
 
-function isCash(method: string): boolean {
-  const normalized = method.trim().toLocaleLowerCase("en-US");
 
-  return (
-    normalized === "cash" ||
-    normalized.includes("cash on the day") ||
-    normalized.includes("cash at the gate")
-  );
-}
 
 function parseRoster(value: unknown): RosterEntry[] {
   if (!Array.isArray(value)) {
@@ -1169,123 +1161,7 @@ export function GateControlDashboard() {
     return () => window.clearInterval(timer);
   }, [isActivityOpen, loadActivity]);
 
-  const beginPayment = useCallback(
-    async (runner: RosterEntry) => {
-      if (isConfirmed(runner)) {
-        setFeedback({
-          tone: "idle",
-          message: `${runner.name} is already confirmed.`,
-        });
-        return;
-      }
 
-      const existingLock = locks.find(
-        (lock) =>
-          lock.runnerRow === runner.rowIndex ||
-          normalizePhone(lock.runnerPhone) === normalizePhone(runner.phone),
-      );
-
-      if (
-        existingLock &&
-        existingLock.adminPhone !== activeAdmin?.phoneE164
-      ) {
-        setFeedback({
-          tone: "error",
-          message: `⚡ ${existingLock.adminName} is already processing ${runner.name}.`,
-        });
-        return;
-      }
-
-      const method: "Cash" | "InstaPay" = isCash(runner.paymentType)
-        ? "Cash"
-        : "InstaPay";
-
-      if (!navigator.onLine) {
-        setPaymentDraft({
-          runner,
-          lockId: null,
-          paymentMethod: method,
-          amountReceived: String(ENTRY_FEE_EGP),
-        });
-        setFeedback({
-          tone: "idle",
-          message: "Offline mode: this check-in will be saved locally.",
-        });
-        return;
-      }
-
-      try {
-        const response = await fetch("/api/admin/runner-locks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "acquire",
-            sheetName: dashboard.sheetName,
-            runnerRow: runner.rowIndex,
-            runnerName: runner.name,
-            runnerPhone: runner.phone,
-          }),
-        });
-        const payload = await readJson(response);
-
-        if (handleUnauthorized(response)) {
-          return;
-        }
-
-        if (
-          !response.ok ||
-          !isRecord(payload) ||
-          !isRecord(payload.lock) ||
-          typeof payload.lock.id !== "string"
-        ) {
-          const owner =
-            isRecord(payload) &&
-            isRecord(payload.lock) &&
-            typeof payload.lock.adminName === "string"
-              ? payload.lock.adminName
-              : "another admin";
-          throw new Error(
-            response.status === 409
-              ? `⚡ ${owner} is already processing ${runner.name}.`
-              : readError(payload, "Unable to reserve this runner."),
-          );
-        }
-
-        setPaymentDraft({
-          runner,
-          lockId: payload.lock.id,
-          paymentMethod: method,
-          amountReceived: String(ENTRY_FEE_EGP),
-        });
-        void refreshLocks();
-      } catch (error) {
-        if (!navigator.onLine) {
-          setPaymentDraft({
-            runner,
-            lockId: null,
-            paymentMethod: method,
-            amountReceived: String(ENTRY_FEE_EGP),
-          });
-          return;
-        }
-
-        setFeedback({
-          tone: "error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "Unable to reserve this runner.",
-        });
-      }
-    },
-    [
-      activeAdmin?.phoneE164,
-      dashboard.sheetName,
-      handleUnauthorized,
-      locks,
-      refreshLocks,
-    ],
-  );
 
   const releaseLock = useCallback(
     async (lockId: string | null) => {
@@ -2595,7 +2471,7 @@ export function GateControlDashboard() {
             />
           </label>
 
-          <div className="mt-3 flex min-w-0 flex-col gap-2">
+          <div className="mt-3 flex min-w-0 flex-col gap-1.5">
             {filteredRoster.length === 0 ? (
               <div className="rounded-xl border border-dashed border-white/10 px-4 py-8 text-center text-sm text-zinc-500">
                 No runners match this view.
@@ -2603,7 +2479,7 @@ export function GateControlDashboard() {
             ) : (
               filteredRoster.map((runner) => {
                 const confirmed = evaluateRunnerState(runner).isConfirmed;
-                const canProcess = runner.source === "attendance" && !confirmed;
+                const isFree = runner.status === "FREE";
                 const lock = lockByRow.get(runner.rowIndex);
                 const lockedByAnother =
                   lock && lock.adminPhone !== activeAdmin?.phoneE164;
@@ -2611,74 +2487,64 @@ export function GateControlDashboard() {
                 return (
                   <div
                     key={`${runner.rowIndex}:${runner.phone}`}
-                    className="flex min-w-0 items-center gap-3 rounded-xl border border-white/10 bg-black/40 p-3"
+                    className="flex h-12 min-w-0 items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/40 px-3 py-1 hover:bg-white/[0.04] transition-colors"
                   >
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => openRunnerEditor(runner)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          openRunnerEditor(runner);
-                        }
-                      }}
-                      className="min-w-0 flex-1 rounded-lg outline-none focus:ring-2 focus:ring-pink-400"
-                      aria-label={`Edit ${runner.name}`}
-                    >
-                      <p className="truncate text-sm font-black">
-                        {runner.name}
-                      </p>
-                      <p className="mt-1 truncate text-[11px] text-zinc-500">
-                        {displayContact(runner.phone)} · {runner.paymentType}
-                      </p>
-                      {runner.amountPaid > 0 || runner.balanceOwed > 0 ? (
-                        <p className="mt-1 truncate text-[10px] font-bold text-zinc-400">
-                          {money(runner.amountPaid)} paid · {money(runner.balanceOwed)} owed
-                        </p>
-                      ) : null}
-                      {runner.source !== "attendance" ? (
-                        <p className="mt-1 text-[9px] font-black uppercase tracking-[0.08em] text-fuchsia-300">
-                          {runner.source === "post-run"
-                            ? "Synced from Post-Run Events"
-                            : "Walk-in runner"}
-                        </p>
-                      ) : null}
-                      {lockedByAnother ? (
-                        <p className="mt-1 truncate text-[10px] font-bold text-amber-300">
-                          ⚡ {lock.adminName} is processing…
-                        </p>
-                      ) : queuedPhones.has(normalizePhone(runner.phone)) ? (
-                        <p className="mt-1 text-[10px] font-bold text-sky-300">
-                          Saved locally · awaiting sync
-                        </p>
-                      ) : null}
-                    </div>
                     <button
                       type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void beginPayment(runner);
-                      }}
-                      disabled={!canProcess || Boolean(lockedByAnother)}
-                      className={`min-h-11 shrink-0 rounded-lg px-3 text-xs font-black ${
-                        confirmed
-                          ? "bg-emerald-500/15 text-emerald-300"
-                          : "bg-gradient-to-r from-orange-500 to-pink-500 text-white"
-                      } disabled:cursor-not-allowed`}
+                      onClick={() => openRunnerEditor(runner)}
+                      className="flex min-w-0 flex-1 flex-col text-left outline-none"
+                      aria-label={`Edit ${runner.name}`}
                     >
-                      {confirmed
-                        ? "Confirmed"
-                        : runner.source === "attendance"
-                          ? "Process"
-                          : "Synced"}
+                      <span className="truncate text-xs font-black text-white leading-tight">
+                        {runner.name}
+                      </span>
+                      <span className="truncate text-[10px] font-bold text-zinc-400">
+                        {displayContact(runner.phone)} · {runner.paymentType}
+                        {runner.source === "post-run" ? " · Post-Run" : runner.source === "walk-in" ? " · Walk-In" : ""}
+                      </span>
                     </button>
+
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[9px] font-black whitespace-nowrap ${
+                          confirmed
+                            ? "bg-emerald-950/90 text-emerald-300 border border-emerald-800/50"
+                            : isFree
+                              ? "bg-sky-950/90 text-sky-300 border border-sky-800/50"
+                              : runner.balanceOwed > 0
+                                ? "bg-amber-950/90 text-amber-300 border border-amber-800/50"
+                                : "bg-zinc-900 text-zinc-400 border border-white/10"
+                        }`}
+                      >
+                        {confirmed
+                          ? "🟢 Cleared"
+                          : isFree
+                            ? "🎁 Free"
+                            : runner.balanceOwed > 0
+                              ? `🟡 Owed ${runner.balanceOwed} EGP`
+                              : "⚪ Unpaid"}
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() => openRunnerEditor(runner)}
+                        disabled={Boolean(lockedByAnother)}
+                        className={`h-8 min-w-12 shrink-0 rounded-lg px-2 text-[10px] font-black active:scale-95 transition-all ${
+                          confirmed
+                            ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                            : "bg-pink-500 text-white hover:bg-pink-400 shadow-md"
+                        } disabled:cursor-not-allowed disabled:opacity-50`}
+                      >
+                        {confirmed ? "Edit" : "Clear"}
+                      </button>
+                    </div>
                   </div>
                 );
               })
             )}
           </div>
         </section>
+
 
         <div
           role="status"
@@ -3211,36 +3077,59 @@ export function GateControlDashboard() {
               </div>
             ) : null}
 
-            <div className="mt-4 flex flex-col gap-2">
-              <button
-                type="submit"
-                disabled={isRunnerSaving}
-                className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all disabled:opacity-60"
-              >
-                {isRunnerSaving ? "Saving & Confirming…" : "✓ Save & Confirm Runner"}
-              </button>
-              <div className="grid min-w-0 grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={closeRunnerEditor}
-                  disabled={isRunnerSaving}
-                  className="min-h-11 rounded-xl border border-white/15 text-xs font-black text-zinc-300 hover:bg-white/5 active:scale-95 transition-all"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void deleteRunner()}
-                  disabled={isRunnerSaving}
-                  className="min-h-11 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-xs font-black text-red-300 hover:bg-red-500/20 active:scale-95 transition-all disabled:opacity-60"
-                >
-                  🗑️ Delete Runner
-                </button>
-              </div>
-            </div>
+            {(() => {
+              const owed = Number(runnerEditDraft.balanceOwed) || 0;
+              const received = Number(runnerEditDraft.amountReceived) || 0;
+              const change = Math.max(0, received - owed);
+
+              return (
+                <div className="mt-4 flex flex-col gap-2">
+                  {change > 0 ? (
+                    <button
+                      type="submit"
+                      disabled={isRunnerSaving}
+                      className="min-h-12 w-full rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 px-4 text-sm font-black text-white shadow-lg hover:from-emerald-400 hover:to-green-500 active:scale-95 transition-all disabled:opacity-60"
+                    >
+                      {isRunnerSaving
+                        ? "Returning Change & Clearing…"
+                        : `💸 Return ${change} EGP Change & Mark Cleared`}
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      disabled={isRunnerSaving}
+                      className="min-h-12 w-full rounded-xl bg-pink-500 px-4 text-sm font-black text-white shadow-lg hover:bg-pink-400 active:scale-95 transition-all disabled:opacity-60"
+                    >
+                      {isRunnerSaving
+                        ? "Saving & Confirming…"
+                        : "✓ Save & Confirm Runner"}
+                    </button>
+                  )}
+                  <div className="grid min-w-0 grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={closeRunnerEditor}
+                      disabled={isRunnerSaving}
+                      className="min-h-11 rounded-xl border border-white/15 text-xs font-black text-zinc-300 hover:bg-white/5 active:scale-95 transition-all"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void deleteRunner()}
+                      disabled={isRunnerSaving}
+                      className="min-h-11 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-xs font-black text-red-300 hover:bg-red-500/20 active:scale-95 transition-all disabled:opacity-60"
+                    >
+                      🗑️ Delete Runner
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </form>
         </div>
       ) : null}
+
 
 
       {paymentDraft ? (
