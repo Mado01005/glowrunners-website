@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import {
   useCallback,
@@ -17,6 +16,7 @@ import {
   type ReactNode,
 } from "react";
 import { sanitizeEGP } from "@/lib/egp";
+import { ImagePreviewModal } from "./ImagePreviewModal";
 
 type DepositStatus = "PENDING" | "VERIFIED";
 type SettlementStatus = "UNPAID" | "FULLY_CLEARED";
@@ -27,6 +27,7 @@ type PaymentStatus =
   | "FREE";
 type PaymentFilter = "all" | "unpaid" | "deposit" | "cleared" | "free";
 type EventModal = "create" | "edit" | null;
+type UpfrontPaymentMethod = "InstaPay" | "Cash";
 
 type ActiveAdmin = Readonly<{
   id: string;
@@ -111,6 +112,7 @@ type ParticipantFormState = {
   fullName: string;
   phoneNumber: string;
   paymentStatus: PaymentStatus;
+  paymentMethod: UpfrontPaymentMethod;
 };
 
 type DuplicateContactWarning = Readonly<{
@@ -132,6 +134,7 @@ const EMPTY_PARTICIPANT_FORM: ParticipantFormState = {
   fullName: "",
   phoneNumber: "",
   paymentStatus: "UNPAID" as PaymentStatus,
+  paymentMethod: "InstaPay",
 };
 
 const SESSION_STORAGE_KEY = "glowrunners.admin.identity.v1";
@@ -337,6 +340,93 @@ function paymentState(participant: Participant, event: PostRunEvent) {
   };
 }
 
+function paymentMethodIcon(method?: string) {
+  return method?.toLocaleLowerCase("en-US").includes("cash") ? "💵" : "📱";
+}
+
+function paymentProofPersistenceValue(
+  paymentProofUrl: string,
+): string | undefined {
+  const normalized = paymentProofUrl.trim();
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (!normalized.startsWith("/api/payment-proofs?")) {
+    return normalized;
+  }
+
+  return (
+    new URLSearchParams(normalized.slice(normalized.indexOf("?") + 1))
+      .get("url")
+      ?.trim() || undefined
+  );
+}
+
+function renderPaymentBadges(participant: Participant, ticketFee: number) {
+  const ticket = safeNonNegativeNumber(ticketFee);
+  const depositAmount = safeNonNegativeNumber(participant.depositAmount);
+  const remainingAmount = safeNonNegativeNumber(participant.remainingAmount);
+  const amountPaid = safeNonNegativeNumber(participant.amountPaid);
+  const balanceOwed = Math.max(0, sanitizeEGP(ticket - amountPaid));
+  const isCleared =
+    participant.paymentStatus === "FULLY_CLEARED" ||
+    (ticket > 0 && amountPaid >= ticket);
+
+  if (participant.paymentStatus === "FREE") {
+    return (
+      <span className="whitespace-nowrap rounded-full border border-sky-800/50 bg-sky-950/90 px-2 py-0.5 text-[9px] font-black text-sky-300">
+        🎁 Free
+      </span>
+    );
+  }
+
+  if (isCleared && depositAmount >= ticket && remainingAmount === 0) {
+    return (
+      <span className="whitespace-nowrap rounded-full border border-emerald-700/60 bg-emerald-950/90 px-2 py-0.5 text-[9px] font-black text-emerald-300">
+        {paymentMethodIcon(participant.depositPaymentMethod)} Cleared:{" "}
+        {formatCompactMoney(ticket)} EGP
+      </span>
+    );
+  }
+
+  if (isCleared && depositAmount > 0 && remainingAmount > 0) {
+    return (
+      <div className="flex min-w-0 flex-wrap justify-end gap-1">
+        <span className="whitespace-nowrap rounded-full border border-sky-800/50 bg-sky-950/80 px-1.5 py-0.5 text-[8px] font-black text-sky-300">
+          {paymentMethodIcon(participant.depositPaymentMethod)} Dep:{" "}
+          {formatCompactMoney(depositAmount)}
+        </span>
+        <span className="whitespace-nowrap rounded-full border border-emerald-700/60 bg-emerald-950/90 px-1.5 py-0.5 text-[8px] font-black text-emerald-300">
+          {paymentMethodIcon(participant.remainingPaymentMethod)} Rem:{" "}
+          {formatCompactMoney(remainingAmount)}
+        </span>
+      </div>
+    );
+  }
+
+  if (depositAmount > 0 || participant.paymentStatus === "DEPOSIT_PAID") {
+    return (
+      <div className="flex min-w-0 flex-wrap justify-end gap-1">
+        <span className="whitespace-nowrap rounded-full border border-sky-800/50 bg-sky-950/80 px-1.5 py-0.5 text-[8px] font-black text-sky-300">
+          {paymentMethodIcon(participant.depositPaymentMethod)} Dep:{" "}
+          {formatCompactMoney(depositAmount)}
+        </span>
+        <span className="whitespace-nowrap rounded-full border border-amber-800/60 bg-amber-950/90 px-1.5 py-0.5 text-[8px] font-black text-amber-200">
+          🟡 Owed {formatCompactMoney(balanceOwed)}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <span className="whitespace-nowrap rounded-full border border-rose-800/60 bg-rose-950/90 px-2 py-0.5 text-[9px] font-black text-rose-300">
+      🔴 Owed {formatCompactMoney(ticket)} EGP
+    </span>
+  );
+}
+
 async function readJson(response: Response): Promise<unknown> {
   try {
     return (await response.json()) as unknown;
@@ -479,12 +569,10 @@ function ModalShell({
   title,
   children,
   onClose,
-  layer = "normal",
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
-  layer?: "normal" | "lightbox";
 }) {
   const titleId = useId();
   const dialogRef = useRef<HTMLElement>(null);
@@ -552,9 +640,7 @@ function ModalShell({
 
   return (
     <div
-      className={`fixed inset-0 ${
-        layer === "lightbox" ? "z-[70]" : "z-50"
-      } flex items-end justify-center overflow-y-auto bg-black/85 sm:items-center sm:p-3`}
+      className="fixed inset-0 z-50 flex items-end justify-center overflow-y-auto bg-black/85 sm:items-center sm:p-3"
       onMouseDown={(event) => {
         if (event.currentTarget === event.target) {
           onClose();
@@ -1645,12 +1731,31 @@ export function PostRunEventsDashboard() {
     setBusyKey("add-participant");
 
     try {
+      const amountPaid =
+        candidate.paymentStatus === "FULLY_CLEARED"
+          ? sanitizeEGP(selectedEvent.totalCost)
+          : candidate.paymentStatus === "DEPOSIT_PAID"
+            ? sanitizeEGP(selectedEvent.depositAmount)
+            : 0;
+      const hasUpfrontPayment = amountPaid > 0;
       const { response, payload } = await apiRequest(
         `/api/events/${encodeURIComponent(selectedEvent.id)}/participants`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...candidate, force }),
+          body: JSON.stringify({
+            ...candidate,
+            amountPaid,
+            depositPaid: amountPaid,
+            settlementStatus: candidate.paymentStatus,
+            paymentMethod: hasUpfrontPayment
+              ? candidate.paymentMethod
+              : undefined,
+            depositPaymentMethod: hasUpfrontPayment
+              ? candidate.paymentMethod
+              : undefined,
+            force,
+          }),
         },
       );
 
@@ -1751,6 +1856,7 @@ export function PostRunEventsDashboard() {
         ...participant,
         fullName: patch.fullName ?? participant.fullName,
         phoneNumber: patch.phoneNumber ?? participant.phoneNumber,
+        paymentProofUrl: participant.paymentProofUrl,
         paymentStatus: nextStatus,
         paymentMethod:
           patch.paymentMethod ?? participant.paymentMethod ?? "Cash",
@@ -1908,6 +2014,16 @@ export function PostRunEventsDashboard() {
 
     activeOperationRef.current = true;
     setBusyKey(`proof:${participant.id}`);
+    const previousProofUrl = participant.paymentProofUrl;
+    const optimisticProofUrl = URL.createObjectURL(file);
+
+    setParticipants((current) =>
+      current.map((candidate) =>
+        candidate.id === participant.id
+          ? { ...candidate, paymentProofUrl: optimisticProofUrl }
+          : candidate,
+      ),
+    );
 
     try {
       const compressed = await compressProofImage(file);
@@ -1934,11 +2050,25 @@ export function PostRunEventsDashboard() {
           candidate.id === participant.id ? updated : candidate,
         ),
       );
+      setLightboxUrl((current) =>
+        current === optimisticProofUrl ? updated.paymentProofUrl : current,
+      );
       setNotice({
         tone: "success",
         message: `${updated.fullName}'s payment proof was saved.`,
       });
     } catch (error) {
+      setParticipants((current) =>
+        current.map((candidate) =>
+          candidate.id === participant.id &&
+          candidate.paymentProofUrl === optimisticProofUrl
+            ? { ...candidate, paymentProofUrl: previousProofUrl }
+            : candidate,
+        ),
+      );
+      setLightboxUrl((current) =>
+        current === optimisticProofUrl ? "" : current,
+      );
       setNotice({
         tone: "error",
         message:
@@ -1947,6 +2077,7 @@ export function PostRunEventsDashboard() {
             : "Payment proof upload failed.",
       });
     } finally {
+      URL.revokeObjectURL(optimisticProofUrl);
       activeOperationRef.current = false;
       setBusyKey("");
     }
@@ -2618,12 +2749,61 @@ export function PostRunEventsDashboard() {
                         }
                         className="mt-1 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
                       >
-                        <option value="UNPAID">Unpaid</option>
+                        <option value="UNPAID">⏳ Unpaid (0 EGP)</option>
+                        <option value="DEPOSIT_PAID">
+                          🟡 Deposit Paid ({formatMoney(selectedEvent.depositAmount)})
+                        </option>
+                        <option value="FULLY_CLEARED">
+                          ✅ Fully Cleared ({formatMoney(selectedEvent.totalCost)})
+                        </option>
                         <option value="FREE">🎁 Free</option>
                       </select>
                     </label>
+                    {participantForm.paymentStatus === "DEPOSIT_PAID" ||
+                    participantForm.paymentStatus === "FULLY_CLEARED" ? (
+                      <fieldset className="min-w-0 sm:col-span-2">
+                        <legend className="text-[10px] font-black uppercase tracking-wide text-zinc-400">
+                          Upfront payment method
+                        </legend>
+                        <div className="mt-1 grid min-w-0 grid-cols-2 gap-2 rounded-xl bg-black p-1">
+                          {(
+                            [
+                              ["InstaPay", "📱 InstaPay / VF Cash"],
+                              ["Cash", "💵 Cash"],
+                            ] as const
+                          ).map(([method, label]) => (
+                            <button
+                              key={method}
+                              type="button"
+                              aria-pressed={
+                                participantForm.paymentMethod === method
+                              }
+                              onClick={() =>
+                                setParticipantForm((current) => ({
+                                  ...current,
+                                  paymentMethod: method,
+                                }))
+                              }
+                              className={`min-h-11 min-w-0 rounded-lg px-2 text-[11px] font-black ${
+                                participantForm.paymentMethod === method
+                                  ? "bg-sky-400 text-black"
+                                  : "border border-zinc-700 bg-zinc-950 text-zinc-300"
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="mt-1.5 text-[10px] font-bold text-zinc-500">
+                          {participantForm.paymentStatus === "FULLY_CLEARED"
+                            ? `${formatMoney(selectedEvent.totalCost)} paid upfront · 0 EGP owed`
+                            : `${formatMoney(selectedEvent.depositAmount)} deposit · ${formatMoney(Math.max(0, selectedEvent.totalCost - selectedEvent.depositAmount))} owed`}
+                        </p>
+                      </fieldset>
+                    ) : null}
                     <button
                       type="submit"
+                      disabled={busyKey === "add-participant"}
                       className="min-h-12 rounded-xl bg-white px-3 text-sm font-black text-black disabled:opacity-50 sm:col-span-2"
                     >
                       {busyKey === "add-participant"
@@ -2695,7 +2875,6 @@ export function PostRunEventsDashboard() {
                   >
                     {visibleParticipants.map((participant) => {
                       const state = paymentState(participant, selectedEvent);
-                      const isCleared = state.kind === "cleared";
                       const isBusy = busyKey.endsWith(`:${participant.id}`);
 
                       return (
@@ -2803,79 +2982,35 @@ export function PostRunEventsDashboard() {
                           </button>
 
                           <div className="flex max-w-[58%] shrink-0 flex-wrap items-center justify-end gap-1">
-                            {(() => {
-                              const depMethod = (
-                                participant.depositPaymentMethod ||
-                                participant.paymentMethod ||
-                                "InstaPay"
-                              ).toLowerCase();
-                              const remMethod = (
-                                participant.remainingPaymentMethod ||
-                                participant.paymentMethod ||
-                                "Cash"
-                              ).toLowerCase();
-                              const isDigitalDep =
-                                depMethod.includes("instapay") ||
-                                depMethod.includes("vodafone") ||
-                                depMethod.includes("digital");
-                              const isDigitalRem =
-                                remMethod.includes("instapay") ||
-                                remMethod.includes("vodafone") ||
-                                remMethod.includes("digital");
-
-                              const hasSplit =
-                                participant.amountPaid >
-                                  (selectedEvent?.depositAmount ?? 200) &&
-                                isDigitalDep !== isDigitalRem;
-
-                              if (participant.depositAmount <= 0) {
-                                return null;
-                              }
-
-                              return (
-                                <span
-                                  className={`rounded-full px-1.5 py-0.5 text-[8px] font-black whitespace-nowrap border ${
-                                    hasSplit
-                                      ? "border-purple-800/50 bg-purple-950/80 text-purple-300"
-                                      : isDigitalRem || isDigitalDep
-                                        ? "border-sky-800/50 bg-sky-950/80 text-sky-300"
-                                        : "border-emerald-800/50 bg-emerald-950/80 text-emerald-300"
-                                  }`}
-                                >
-                                  {isDigitalDep ? "📱" : "💵"} Dep:{" "}
-                                  {formatCompactMoney(participant.depositAmount)}
-                                </span>
-                              );
-                            })()}
-
-
-                            <span
-                              className={`rounded-full px-2 py-0.5 text-[9px] font-black whitespace-nowrap ${
-                                (Number(participant.changeOwed) || 0) > 0
-                                  ? "bg-rose-950/90 text-rose-300 border border-rose-800/50"
-                                  : isCleared
-                                    ? "bg-emerald-950/90 text-emerald-300 border border-emerald-800/50"
-                                    : state.kind === "free"
-                                      ? "bg-sky-950/90 text-sky-300 border border-sky-800/50"
-                                      : state.kind === "deposit"
-                                        ? "bg-amber-950/90 text-amber-200 border border-amber-800/50"
-                                        : state.remaining > 0
-                                          ? "bg-rose-950/90 text-rose-300 border border-rose-800/50"
-                                          : "bg-zinc-900 text-zinc-400 border border-white/10"
-                              }`}
-                            >
-                              {(Number(participant.changeOwed) || 0) > 0
-                                ? `🔴 Change: ${participant.changeOwed} EGP`
-                                : isCleared
-                                  ? `${participant.remainingPaymentMethod === "InstaPay" ? "📱" : "💵"} Rem: ${formatCompactMoney(participant.remainingAmount)}`
-                                  : state.kind === "free"
-                                    ? "🎁 Free"
-                                    : state.remaining > 0
-                                      ? `🟡 Owed ${formatCompactMoney(state.remaining)}`
-                                      : "⚪ Unpaid"}
-                            </span>
-
-
+                            {participant.paymentProofUrl ? (
+                              <button
+                                type="button"
+                                title="View Payment Proof"
+                                aria-label={`View payment proof for ${participant.fullName}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setLightboxUrl(participant.paymentProofUrl);
+                                }}
+                                className="flex min-h-11 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-neutral-700 bg-neutral-800 px-2 text-[10px] font-black text-neutral-200 outline-none transition-all hover:bg-neutral-700 active:scale-95 focus-visible:ring-2 focus-visible:ring-neutral-300"
+                              >
+                                <span aria-hidden="true">📸</span>
+                                <span className="hidden sm:inline">Proof</span>
+                              </button>
+                            ) : null}
+                            {renderPaymentBadges(
+                              participant,
+                              selectedEvent.totalCost,
+                            )}
+                            {safeNonNegativeNumber(participant.changeOwed) >
+                            0 ? (
+                              <span className="whitespace-nowrap rounded-full border border-rose-800/60 bg-rose-950/90 px-2 py-0.5 text-[9px] font-black text-rose-300">
+                                🔴 Change: {formatCompactMoney(
+                                  safeNonNegativeNumber(
+                                    participant.changeOwed,
+                                  ),
+                                )}
+                              </span>
+                            ) : null}
                             <button
                               type="button"
                               disabled={
@@ -2886,7 +3021,7 @@ export function PostRunEventsDashboard() {
                                 event.stopPropagation();
                                 handleOpenEditModal(participant);
                               }}
-                              className={`h-8 min-w-12 shrink-0 rounded-lg px-2 text-[10px] font-black active:scale-95 transition-all ${
+                              className={`min-h-11 min-w-12 shrink-0 rounded-lg px-2 text-[10px] font-black active:scale-95 transition-all ${
                                 state.kind === "deposit"
                                   ? "bg-emerald-400 text-black hover:bg-emerald-300 shadow-md"
                                   : "border border-zinc-700 bg-zinc-900 text-zinc-200"
@@ -3226,6 +3361,9 @@ export function PostRunEventsDashboard() {
                             paymentStatusDraft === "FULLY_CLEARED"
                               ? new Date().toISOString()
                               : selectedParticipant.remainingTimestamp,
+                          paymentProofUrl: paymentProofPersistenceValue(
+                            selectedParticipant.paymentProofUrl,
+                          ),
                         },
                         "edit",
                       );
@@ -3693,22 +3831,11 @@ export function PostRunEventsDashboard() {
       ) : null}
 
       {lightboxUrl ? (
-        <ModalShell
-          title="Payment proof screenshot"
+        <ImagePreviewModal
+          imageUrl={lightboxUrl}
+          alt="Uploaded payment receipt"
           onClose={() => setLightboxUrl("")}
-          layer="lightbox"
-        >
-          <div className="relative mt-3 h-[72svh] overflow-hidden rounded-xl border border-zinc-700 bg-black">
-            <Image
-              src={lightboxUrl}
-              alt="Uploaded payment proof"
-              fill
-              unoptimized
-              sizes="(max-width: 448px) 100vw, 448px"
-              className="object-contain"
-            />
-          </div>
-        </ModalShell>
+        />
       ) : null}
     </main>
   );

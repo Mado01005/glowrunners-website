@@ -976,6 +976,36 @@ export function computePostRunRemainingBalance(
   return Math.max(0, sanitizeEGP(safeTicketPrice - safeAmountPaid));
 }
 
+export function computePostRunPaymentBreakdown(
+  amountPaidEgp: number,
+  requiredDepositEgp: number,
+  settlementStatus: PostRunSettlementStatus,
+  hasRemainderSettlement: boolean,
+): Readonly<{ depositAmountEgp: number; remainingAmountPaidEgp: number }> {
+  if (settlementStatus === "Free") {
+    return { depositAmountEgp: 0, remainingAmountPaidEgp: 0 };
+  }
+
+  const amountPaid = Math.max(0, sanitizeEGP(amountPaidEgp));
+  const requiredDeposit = Math.max(0, sanitizeEGP(requiredDepositEgp));
+
+  if (settlementStatus === "Fully Cleared" && !hasRemainderSettlement) {
+    return {
+      depositAmountEgp: amountPaid,
+      remainingAmountPaidEgp: 0,
+    };
+  }
+
+  const depositAmountEgp = Math.min(amountPaid, requiredDeposit);
+  return {
+    depositAmountEgp,
+    remainingAmountPaidEgp:
+      settlementStatus === "Fully Cleared"
+        ? Math.max(0, amountPaid - depositAmountEgp)
+        : 0,
+  };
+}
+
 export function derivePostRunPaymentStatuses(
   amountPaidEgp: number,
   eventTicketPriceEgp: number,
@@ -1536,6 +1566,12 @@ function parseParticipantRow(
     event.totalCostPerPersonEgp,
     requestedSettlementStatus,
   );
+  const paymentBreakdown = computePostRunPaymentBreakdown(
+    effectiveAmountPaidEgp,
+    event.requiredDepositPerPersonEgp,
+    settlementStatus,
+    false,
+  );
   const createdAt = requireTimestamp(
     getCell(row, columns, "createdAt"),
     "Created at",
@@ -1587,21 +1623,12 @@ function parseParticipantRow(
     ),
     depositStatus,
     depositAmountPaidEgp: effectiveAmountPaidEgp,
-    depositAmountEgp: Math.min(
-      effectiveAmountPaidEgp,
-      event.requiredDepositPerPersonEgp,
-    ),
-    remainingAmountPaidEgp: Math.max(
-      0,
-      effectiveAmountPaidEgp - event.requiredDepositPerPersonEgp,
-    ),
+    ...paymentBreakdown,
     depositPaymentMethod:
       effectiveAmountPaidEgp > 0 ? "InstaPay" : undefined,
     depositTimestamp: effectiveAmountPaidEgp > 0 ? createdAt : undefined,
-    remainingPaymentMethod:
-      settlementStatus === "Fully Cleared" ? "Cash" : undefined,
-    remainingTimestamp:
-      settlementStatus === "Fully Cleared" ? createdAt : undefined,
+    remainingPaymentMethod: undefined,
+    remainingTimestamp: undefined,
     paymentScreenshotUrl: normalizeStoredScreenshotUrl(
       getCell(row, columns, "paymentScreenshotUrl"),
       rowIndex,
@@ -1899,6 +1926,21 @@ function applyParticipantUpdate(
     event.totalCostPerPersonEgp,
     requestedSettlementStatus,
   );
+  const becameFullyCleared =
+    current.settlementStatus !== "Fully Cleared" &&
+    settlementStatus === "Fully Cleared";
+  const remainingTimestamp =
+    update.patch.remainingTimestamp ??
+    current.remainingTimestamp ??
+    (becameFullyCleared ? update.createdAt : undefined);
+  const isSplitPayment =
+    settlementStatus === "Fully Cleared" && Boolean(remainingTimestamp);
+  const paymentBreakdown = computePostRunPaymentBreakdown(
+    depositAmountPaidEgp,
+    event.requiredDepositPerPersonEgp,
+    settlementStatus,
+    isSplitPayment,
+  );
 
   return {
     ...current,
@@ -1907,14 +1949,7 @@ function applyParticipantUpdate(
       update.patch.whatsappPhone ?? current.whatsappPhone,
     depositStatus,
     depositAmountPaidEgp,
-    depositAmountEgp: Math.min(
-      depositAmountPaidEgp,
-      event.requiredDepositPerPersonEgp,
-    ),
-    remainingAmountPaidEgp: Math.max(
-      0,
-      depositAmountPaidEgp - event.requiredDepositPerPersonEgp,
-    ),
+    ...paymentBreakdown,
     paymentMethod:
       update.patch.paymentMethod ?? current.paymentMethod ?? "Cash",
     depositPaymentMethod:
@@ -1923,8 +1958,7 @@ function applyParticipantUpdate(
       update.patch.depositTimestamp ?? current.depositTimestamp,
     remainingPaymentMethod:
       update.patch.remainingPaymentMethod ?? current.remainingPaymentMethod,
-    remainingTimestamp:
-      update.patch.remainingTimestamp ?? current.remainingTimestamp,
+    remainingTimestamp,
     changeOwed:
       update.patch.changeOwed !== undefined
         ? update.patch.changeOwed
@@ -3154,6 +3188,12 @@ export async function addEventParticipant(
       "Admin phone",
     );
     const now = new Date().toISOString();
+    const paymentBreakdown = computePostRunPaymentBreakdown(
+      depositAmountPaidEgp,
+      event.requiredDepositPerPersonEgp,
+      settlementStatus,
+      false,
+    );
     const participant: PostRunParticipant = {
       id: randomUUID(),
       eventId: event.id,
@@ -3161,14 +3201,7 @@ export async function addEventParticipant(
       whatsappPhone,
       depositStatus,
       depositAmountPaidEgp,
-      depositAmountEgp: Math.min(
-        depositAmountPaidEgp,
-        event.requiredDepositPerPersonEgp,
-      ),
-      remainingAmountPaidEgp: Math.max(
-        0,
-        depositAmountPaidEgp - event.requiredDepositPerPersonEgp,
-      ),
+      ...paymentBreakdown,
       paymentMethod: input.paymentMethod ?? "InstaPay",
       depositPaymentMethod:
         depositAmountPaidEgp > 0
@@ -3176,14 +3209,8 @@ export async function addEventParticipant(
           : undefined,
       depositTimestamp:
         depositAmountPaidEgp > 0 ? input.depositTimestamp ?? now : undefined,
-      remainingPaymentMethod:
-        settlementStatus === "Fully Cleared"
-          ? input.remainingPaymentMethod ?? "Cash"
-          : undefined,
-      remainingTimestamp:
-        settlementStatus === "Fully Cleared"
-          ? input.remainingTimestamp ?? now
-          : undefined,
+      remainingPaymentMethod: undefined,
+      remainingTimestamp: undefined,
       paymentScreenshotUrl,
       remainingBalanceEgp,
       settlementStatus,
@@ -3219,6 +3246,51 @@ export async function addEventParticipant(
         return rows.some((row) => row.value.id === participant.id);
       },
     );
+
+    if (depositAmountPaidEgp > 0) {
+      const initialPaymentUpdate: ParticipantUpdate = {
+        id: randomUUID(),
+        eventId: event.id,
+        participantId: participant.id,
+        patch: {
+          paymentMethod: participant.paymentMethod,
+          depositPaymentMethod: participant.depositPaymentMethod,
+          depositTimestamp: participant.depositTimestamp,
+        },
+        createdAt: now,
+        updatedByAdminPhone: normalizedAdminPhone,
+      };
+      const updateRow = participantUpdateToRow(
+        initialPaymentUpdate,
+        columns.participantUpdates,
+      );
+      const updateFinalColumn = columnIndexToA1(
+        Math.max(...Object.values(columns.participantUpdates)),
+      );
+
+      await withGoogleSheetsIdempotentMutationRetry(
+        `record upfront payment for participant ${participant.id}`,
+        () =>
+          sheets.spreadsheets.values.append({
+            spreadsheetId: GOOGLE_SPREADSHEET_ID,
+            range: `${quoteSheetName(
+              POST_RUN_PARTICIPANT_UPDATES_SHEET_NAME,
+            )}!A:${updateFinalColumn}`,
+            valueInputOption: "RAW",
+            insertDataOption: "INSERT_ROWS",
+            requestBody: { values: [updateRow] },
+          }),
+        async () => {
+          const updates = await readParticipantUpdates(
+            event,
+            columns.participantUpdates,
+          );
+          return updates.some(
+            (candidate) => candidate.id === initialPaymentUpdate.id,
+          );
+        },
+      );
+    }
 
     const reconciled = await reconcileParticipantAddition(
       event,
@@ -3455,6 +3527,7 @@ export async function updateEventParticipant(
 
     if (
       nextSettlementStatus === "Fully Cleared" &&
+      currentRow.value.settlementStatus !== "Fully Cleared" &&
       !currentRow.value.remainingTimestamp
     ) {
       normalizedPatch.remainingTimestamp ??= mutationTimestamp;

@@ -269,11 +269,7 @@ export function toParticipantResponse(participant: PostRunParticipant) {
       participant.paymentMethod ||
       "Cash",
     remainingAmount,
-    remainingTimestamp:
-      participant.remainingTimestamp ||
-      (participant.settlementStatus === "Fully Cleared"
-        ? participant.updatedAt
-        : undefined),
+    remainingTimestamp: participant.remainingTimestamp,
     changeOwed: sanitizeEGP(participant.changeOwed),
     remainingBalance,
     paymentStatus:
