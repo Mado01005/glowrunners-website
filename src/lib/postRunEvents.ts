@@ -9,6 +9,7 @@ import {
   withGoogleSheetsIdempotentMutationRetry,
   withGoogleSheetsRetry,
 } from "@/lib/googleSheets";
+import { sanitizeEGP } from "@/lib/egp";
 
 export const parseCheckedInCell = (val: unknown): boolean => {
   if (val === true || val === 1) return true;
@@ -64,7 +65,7 @@ export type PostRunEvent = Readonly<{
   totalCostPerPersonEgp: number;
   requiredDepositPerPersonEgp: number;
   maxCapacity: number | null;
-  paymentInstructions: string;
+  paymentInstructions?: string;
   createdAt: string;
   updatedAt: string;
   createdByAdminPhone: string;
@@ -78,7 +79,7 @@ export type PostRunEventInput = Readonly<{
   totalCostPerPersonEgp: number;
   requiredDepositPerPersonEgp: number;
   maxCapacity: number | null;
-  paymentInstructions: string;
+  paymentInstructions?: string;
 }>;
 
 export type PostRunEventPatch = Readonly<
@@ -98,9 +99,13 @@ export type PostRunParticipant = Readonly<{
   whatsappPhone: string;
   depositStatus: PostRunDepositStatus;
   depositAmountPaidEgp: number;
+  depositAmountEgp: number;
+  remainingAmountPaidEgp: number;
   paymentMethod?: string;
   depositPaymentMethod?: string;
+  depositTimestamp?: string;
   remainingPaymentMethod?: string;
+  remainingTimestamp?: string;
   changeOwed?: number;
   paymentScreenshotUrl: string | null;
   remainingBalanceEgp: number;
@@ -124,7 +129,9 @@ export type PostRunParticipantInput = Readonly<{
   depositAmountPaidEgp?: number;
   paymentMethod?: string;
   depositPaymentMethod?: string;
+  depositTimestamp?: string;
   remainingPaymentMethod?: string;
+  remainingTimestamp?: string;
   changeOwed?: number;
   paymentScreenshotUrl?: string | null;
   settlementStatus?: PostRunSettlementStatus;
@@ -138,7 +145,9 @@ export type PostRunParticipantPatch = Readonly<{
   depositAmountPaidEgp?: number;
   paymentMethod?: string;
   depositPaymentMethod?: string;
+  depositTimestamp?: string;
   remainingPaymentMethod?: string;
+  remainingTimestamp?: string;
   changeOwed?: number;
   paymentScreenshotUrl?: string | null;
   settlementStatus?: PostRunSettlementStatus;
@@ -541,6 +550,36 @@ function requireStoredText(
   }
 }
 
+function optionalBoundedText(
+  value: unknown,
+  fieldName: string,
+  maxLength: number,
+  errorKind: "CONFIGURATION" | "VALIDATION" = "VALIDATION",
+): string | undefined {
+  if (value === null || value === undefined || value === "") {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new PostRunEventsError(errorKind, `${fieldName} must be text.`);
+  }
+
+  const normalized = value.trim();
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (normalized.length > maxLength) {
+    throw new PostRunEventsError(
+      errorKind,
+      `${fieldName} must be ${maxLength} characters or fewer.`,
+    );
+  }
+
+  return normalized;
+}
+
 function normalizeInternalNotes(
   value: unknown,
   errorKind: "CONFIGURATION" | "VALIDATION" = "VALIDATION",
@@ -580,19 +619,14 @@ function normalizeMoney(
     parsed = Number.NaN;
   }
 
-  if (
-    !Number.isFinite(parsed) ||
-    parsed < 0 ||
-    parsed > MAX_MONEY_EGP ||
-    Math.abs(parsed * 100 - Math.round(parsed * 100)) > 1e-7
-  ) {
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_MONEY_EGP) {
     throw new PostRunEventsError(
       errorKind,
-      `${fieldName} must be a non-negative EGP amount with at most two decimal places.`,
+      `${fieldName} must be a non-negative EGP amount.`,
     );
   }
 
-  return Math.round(parsed * 100) / 100;
+  return sanitizeEGP(parsed);
 }
 
 function requireCapacity(
@@ -936,17 +970,10 @@ export function computePostRunRemainingBalance(
   totalCostPerPersonEgp: number,
   depositAmountPaidEgp: number,
 ): number {
-  const safeTicketPrice = Number.isFinite(totalCostPerPersonEgp)
-    ? Math.max(0, totalCostPerPersonEgp)
-    : 0;
-  const safeAmountPaid = Number.isFinite(depositAmountPaidEgp)
-    ? Math.max(0, depositAmountPaidEgp)
-    : 0;
+  const safeTicketPrice = Math.max(0, sanitizeEGP(totalCostPerPersonEgp));
+  const safeAmountPaid = Math.max(0, sanitizeEGP(depositAmountPaidEgp));
 
-  return Math.max(
-    0,
-    Math.round((safeTicketPrice - safeAmountPaid) * 100) / 100,
-  );
+  return Math.max(0, sanitizeEGP(safeTicketPrice - safeAmountPaid));
 }
 
 export function derivePostRunPaymentStatuses(
@@ -964,12 +991,8 @@ export function derivePostRunPaymentStatuses(
     };
   }
 
-  const safeAmountPaid = Number.isFinite(amountPaidEgp)
-    ? Math.max(0, amountPaidEgp)
-    : 0;
-  const safeTicketPrice = Number.isFinite(eventTicketPriceEgp)
-    ? Math.max(0, eventTicketPriceEgp)
-    : 0;
+  const safeAmountPaid = Math.max(0, sanitizeEGP(amountPaidEgp));
+  const safeTicketPrice = Math.max(0, sanitizeEGP(eventTicketPriceEgp));
 
   if (safeAmountPaid <= 0) {
     return {
@@ -1329,7 +1352,7 @@ function eventToRow(
   row[columns.requiredDepositPerPersonEgp] =
     event.requiredDepositPerPersonEgp;
   row[columns.maxCapacity] = event.maxCapacity ?? "";
-  row[columns.paymentInstructions] = event.paymentInstructions;
+  row[columns.paymentInstructions] = event.paymentInstructions ?? "";
   row[columns.createdAt] = event.createdAt;
   row[columns.updatedAt] = event.updatedAt;
   row[columns.createdByAdminPhone] = event.createdByAdminPhone;
@@ -1445,11 +1468,11 @@ function parseEventRow(
       getCell(row, columns, "maxCapacity"),
       "CONFIGURATION",
     ),
-    paymentInstructions: requireStoredText(
+    paymentInstructions: optionalBoundedText(
       getCell(row, columns, "paymentInstructions"),
       "Payment instructions",
-      rowIndex,
       MAX_PAYMENT_INSTRUCTIONS_LENGTH,
+      "CONFIGURATION",
     ),
     createdAt: requireTimestamp(
       getCell(row, columns, "createdAt"),
@@ -1513,6 +1536,11 @@ function parseParticipantRow(
     event.totalCostPerPersonEgp,
     requestedSettlementStatus,
   );
+  const createdAt = requireTimestamp(
+    getCell(row, columns, "createdAt"),
+    "Created at",
+    rowIndex,
+  );
   const storedRemainingBalance = requestedSettlementStatus === "Free"
     ? 0
     : normalizeMoney(
@@ -1559,17 +1587,28 @@ function parseParticipantRow(
     ),
     depositStatus,
     depositAmountPaidEgp: effectiveAmountPaidEgp,
+    depositAmountEgp: Math.min(
+      effectiveAmountPaidEgp,
+      event.requiredDepositPerPersonEgp,
+    ),
+    remainingAmountPaidEgp: Math.max(
+      0,
+      effectiveAmountPaidEgp - event.requiredDepositPerPersonEgp,
+    ),
+    depositPaymentMethod:
+      effectiveAmountPaidEgp > 0 ? "InstaPay" : undefined,
+    depositTimestamp: effectiveAmountPaidEgp > 0 ? createdAt : undefined,
+    remainingPaymentMethod:
+      settlementStatus === "Fully Cleared" ? "Cash" : undefined,
+    remainingTimestamp:
+      settlementStatus === "Fully Cleared" ? createdAt : undefined,
     paymentScreenshotUrl: normalizeStoredScreenshotUrl(
       getCell(row, columns, "paymentScreenshotUrl"),
       rowIndex,
     ),
     remainingBalanceEgp,
     settlementStatus,
-    createdAt: requireTimestamp(
-      getCell(row, columns, "createdAt"),
-      "Created at",
-      rowIndex,
-    ),
+    createdAt,
     updatedAt: requireTimestamp(
       getCell(row, columns, "updatedAt"),
       "Updated at",
@@ -1638,7 +1677,9 @@ function parseParticipantUpdateRow(
     "depositAmountPaidEgp",
     "paymentMethod",
     "depositPaymentMethod",
+    "depositTimestamp",
     "remainingPaymentMethod",
+    "remainingTimestamp",
     "changeOwed",
     "paymentScreenshotUrl",
     "settlementStatus",
@@ -1661,7 +1702,9 @@ function parseParticipantUpdateRow(
     depositAmountPaidEgp?: number;
     paymentMethod?: string;
     depositPaymentMethod?: string;
+    depositTimestamp?: string;
     remainingPaymentMethod?: string;
+    remainingTimestamp?: string;
     changeOwed?: number;
     paymentScreenshotUrl?: string | null;
     settlementStatus?: PostRunSettlementStatus;
@@ -1715,6 +1758,14 @@ function parseParticipantUpdateRow(
         : undefined;
   }
 
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "depositTimestamp")) {
+    patch.depositTimestamp = optionalTimestamp(
+      rawPatch.depositTimestamp,
+      "Deposit timestamp",
+      rowIndex,
+    ) ?? undefined;
+  }
+
   if (Object.prototype.hasOwnProperty.call(rawPatch, "remainingPaymentMethod")) {
     patch.remainingPaymentMethod =
       typeof rawPatch.remainingPaymentMethod === "string"
@@ -1722,8 +1773,24 @@ function parseParticipantUpdateRow(
         : undefined;
   }
 
+  if (Object.prototype.hasOwnProperty.call(rawPatch, "remainingTimestamp")) {
+    patch.remainingTimestamp = optionalTimestamp(
+      rawPatch.remainingTimestamp,
+      "Remaining settlement timestamp",
+      rowIndex,
+    ) ?? undefined;
+  }
+
   if (Object.prototype.hasOwnProperty.call(rawPatch, "changeOwed")) {
-    patch.changeOwed = Math.max(0, Number(rawPatch.changeOwed) || 0);
+    patch.changeOwed = Math.max(
+      0,
+      sanitizeEGP(
+        typeof rawPatch.changeOwed === "number" ||
+          typeof rawPatch.changeOwed === "string"
+          ? rawPatch.changeOwed
+          : 0,
+      ),
+    );
   }
 
   if (Object.prototype.hasOwnProperty.call(rawPatch, "paymentScreenshotUrl")) {
@@ -1840,12 +1907,24 @@ function applyParticipantUpdate(
       update.patch.whatsappPhone ?? current.whatsappPhone,
     depositStatus,
     depositAmountPaidEgp,
+    depositAmountEgp: Math.min(
+      depositAmountPaidEgp,
+      event.requiredDepositPerPersonEgp,
+    ),
+    remainingAmountPaidEgp: Math.max(
+      0,
+      depositAmountPaidEgp - event.requiredDepositPerPersonEgp,
+    ),
     paymentMethod:
       update.patch.paymentMethod ?? current.paymentMethod ?? "Cash",
     depositPaymentMethod:
       update.patch.depositPaymentMethod ?? current.depositPaymentMethod,
+    depositTimestamp:
+      update.patch.depositTimestamp ?? current.depositTimestamp,
     remainingPaymentMethod:
       update.patch.remainingPaymentMethod ?? current.remainingPaymentMethod,
+    remainingTimestamp:
+      update.patch.remainingTimestamp ?? current.remainingTimestamp,
     changeOwed:
       update.patch.changeOwed !== undefined
         ? update.patch.changeOwed
@@ -2515,7 +2594,7 @@ export async function createPostRunEvent(
   }
 
   const maxCapacity = requireCapacity(input.maxCapacity);
-  const paymentInstructions = requireBoundedText(
+  const paymentInstructions = optionalBoundedText(
     input.paymentInstructions,
     "Payment instructions",
     MAX_PAYMENT_INSTRUCTIONS_LENGTH,
@@ -2670,7 +2749,7 @@ export async function updatePostRunEvent(
         patch,
         "paymentInstructions",
       )
-        ? requireBoundedText(
+        ? optionalBoundedText(
             patch.paymentInstructions,
             "Payment instructions",
             MAX_PAYMENT_INSTRUCTIONS_LENGTH,
@@ -3082,6 +3161,29 @@ export async function addEventParticipant(
       whatsappPhone,
       depositStatus,
       depositAmountPaidEgp,
+      depositAmountEgp: Math.min(
+        depositAmountPaidEgp,
+        event.requiredDepositPerPersonEgp,
+      ),
+      remainingAmountPaidEgp: Math.max(
+        0,
+        depositAmountPaidEgp - event.requiredDepositPerPersonEgp,
+      ),
+      paymentMethod: input.paymentMethod ?? "InstaPay",
+      depositPaymentMethod:
+        depositAmountPaidEgp > 0
+          ? input.depositPaymentMethod ?? input.paymentMethod ?? "InstaPay"
+          : undefined,
+      depositTimestamp:
+        depositAmountPaidEgp > 0 ? input.depositTimestamp ?? now : undefined,
+      remainingPaymentMethod:
+        settlementStatus === "Fully Cleared"
+          ? input.remainingPaymentMethod ?? "Cash"
+          : undefined,
+      remainingTimestamp:
+        settlementStatus === "Fully Cleared"
+          ? input.remainingTimestamp ?? now
+          : undefined,
       paymentScreenshotUrl,
       remainingBalanceEgp,
       settlementStatus,
@@ -3158,7 +3260,9 @@ export async function updateEventParticipant(
       "depositAmountPaidEgp",
       "paymentMethod",
       "depositPaymentMethod",
+      "depositTimestamp",
       "remainingPaymentMethod",
+      "remainingTimestamp",
       "changeOwed",
       "paymentScreenshotUrl",
       "settlementStatus",
@@ -3216,7 +3320,9 @@ export async function updateEventParticipant(
       depositAmountPaidEgp?: number;
       paymentMethod?: string;
       depositPaymentMethod?: string;
+      depositTimestamp?: string;
       remainingPaymentMethod?: string;
+      remainingTimestamp?: string;
       changeOwed?: number;
       paymentScreenshotUrl?: string | null;
       settlementStatus?: PostRunSettlementStatus;
@@ -3266,6 +3372,14 @@ export async function updateEventParticipant(
           : undefined;
     }
 
+    if (Object.prototype.hasOwnProperty.call(patch, "depositTimestamp")) {
+      normalizedPatch.depositTimestamp =
+        normalizeOptionalMutationTimestamp(
+          patch.depositTimestamp,
+          "Deposit timestamp",
+        ) ?? undefined;
+    }
+
     if (Object.prototype.hasOwnProperty.call(patch, "remainingPaymentMethod")) {
       normalizedPatch.remainingPaymentMethod =
         typeof patch.remainingPaymentMethod === "string"
@@ -3273,11 +3387,16 @@ export async function updateEventParticipant(
           : undefined;
     }
 
+    if (Object.prototype.hasOwnProperty.call(patch, "remainingTimestamp")) {
+      normalizedPatch.remainingTimestamp =
+        normalizeOptionalMutationTimestamp(
+          patch.remainingTimestamp,
+          "Remaining settlement timestamp",
+        ) ?? undefined;
+    }
+
     if (Object.prototype.hasOwnProperty.call(patch, "changeOwed")) {
-      normalizedPatch.changeOwed = Math.max(
-        0,
-        Number(patch.changeOwed) || 0,
-      );
+      normalizedPatch.changeOwed = Math.max(0, sanitizeEGP(patch.changeOwed));
     }
 
 
@@ -3316,6 +3435,35 @@ export async function updateEventParticipant(
             );
     }
 
+    const mutationTimestamp = new Date().toISOString();
+    const nextAmountPaid =
+      normalizedPatch.settlementStatus === "Free"
+        ? 0
+        : normalizedPatch.depositAmountPaidEgp ??
+          currentRow.value.depositAmountPaidEgp;
+    const nextSettlementStatus =
+      normalizedPatch.settlementStatus ??
+      (nextAmountPaid >= event.totalCostPerPersonEgp
+        ? "Fully Cleared"
+        : "Unpaid");
+
+    if (nextAmountPaid > 0 && !currentRow.value.depositTimestamp) {
+      normalizedPatch.depositTimestamp ??= mutationTimestamp;
+      normalizedPatch.depositPaymentMethod ??=
+        currentRow.value.depositPaymentMethod || "InstaPay";
+    }
+
+    if (
+      nextSettlementStatus === "Fully Cleared" &&
+      !currentRow.value.remainingTimestamp
+    ) {
+      normalizedPatch.remainingTimestamp ??= mutationTimestamp;
+      normalizedPatch.remainingPaymentMethod ??=
+        normalizedPatch.paymentMethod ||
+        currentRow.value.remainingPaymentMethod ||
+        "Cash";
+    }
+
     const updatedByAdminPhone = requireCanonicalPhone(
       adminPhone,
       "Admin phone",
@@ -3325,7 +3473,7 @@ export async function updateEventParticipant(
       eventId: event.id,
       participantId: currentRow.value.id,
       patch: normalizedPatch,
-      createdAt: new Date().toISOString(),
+      createdAt: mutationTimestamp,
       updatedByAdminPhone,
     };
     const row = participantUpdateToRow(

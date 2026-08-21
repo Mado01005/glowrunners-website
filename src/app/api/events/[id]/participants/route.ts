@@ -130,6 +130,18 @@ export async function POST(
                 body.depositPaid ??
                 body.deposit_paid,
             ),
+      paymentMethod:
+        typeof body.paymentMethod === "string" ? body.paymentMethod : "InstaPay",
+      depositPaymentMethod:
+        typeof (body.depositPaymentMethod ?? body.deposit_payment_method) ===
+        "string"
+          ? String(body.depositPaymentMethod ?? body.deposit_payment_method)
+          : "InstaPay",
+      remainingPaymentMethod:
+        typeof (body.remainingPaymentMethod ?? body.remaining_payment_method) ===
+        "string"
+          ? String(body.remainingPaymentMethod ?? body.remaining_payment_method)
+          : undefined,
       paymentScreenshotUrl:
         typeof (body.paymentProofUrl ?? body.payment_proof_url) === "string"
           ? String(body.paymentProofUrl ?? body.payment_proof_url)

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { GoogleSheetsMutationOutcomeUnknownError } from "@/lib/googleSheets";
+import { sanitizeEGP } from "@/lib/egp";
 import {
   normalizeContactInput,
   PostRunEventsError,
@@ -22,11 +23,12 @@ export function isApiObject(value: unknown): value is Record<string, unknown> {
 
 export function toFiniteNumber(value: unknown): number {
   if (typeof value === "number") {
-    return value;
+    return sanitizeEGP(value);
   }
 
   if (typeof value === "string" && value.trim()) {
-    return Number(value.replaceAll(",", "").trim());
+    const parsed = Number(value.replaceAll(",", "").trim());
+    return Number.isFinite(parsed) ? sanitizeEGP(parsed) : Number.NaN;
   }
 
   return Number.NaN;
@@ -46,7 +48,9 @@ export function toParticipantPatch(
     depositAmountPaidEgp?: number;
     paymentMethod?: string;
     depositPaymentMethod?: string;
+    depositTimestamp?: string;
     remainingPaymentMethod?: string;
+    remainingTimestamp?: string;
     changeOwed?: number;
     paymentScreenshotUrl?: string | null;
     settlementStatus?: PostRunParticipantPatch["settlementStatus"];
@@ -81,6 +85,11 @@ export function toParticipantPatch(
     );
   }
 
+  if (hasOwn(body, "depositTimestamp") || hasOwn(body, "deposit_timestamp")) {
+    const value = body.depositTimestamp ?? body.deposit_timestamp;
+    patch.depositTimestamp = typeof value === "string" ? value : undefined;
+  }
+
   if (hasOwn(body, "depositStatus") || hasOwn(body, "deposit_status")) {
     const value = body.depositStatus ?? body.deposit_status;
     patch.depositStatus =
@@ -103,6 +112,14 @@ export function toParticipantPatch(
         body.depositPaid ??
         body.deposit_paid,
     );
+  }
+
+  if (
+    hasOwn(body, "remainingTimestamp") ||
+    hasOwn(body, "remaining_timestamp")
+  ) {
+    const value = body.remainingTimestamp ?? body.remaining_timestamp;
+    patch.remainingTimestamp = typeof value === "string" ? value : undefined;
   }
 
   if (
@@ -214,6 +231,20 @@ export function toParticipantResponse(participant: PostRunParticipant) {
         )}&url=${encodeURIComponent(storedProof)}`
       : storedProof;
 
+  const amountPaid = Math.max(
+    0,
+    sanitizeEGP(participant.depositAmountPaidEgp),
+  );
+  const remainingBalance = Math.max(
+    0,
+    sanitizeEGP(participant.remainingBalanceEgp),
+  );
+  const depositAmount = Math.max(0, sanitizeEGP(participant.depositAmountEgp));
+  const remainingAmount = Math.max(
+    0,
+    sanitizeEGP(participant.remainingAmountPaidEgp),
+  );
+
   return {
     id: participant.id,
     eventId: participant.eventId,
@@ -221,20 +252,30 @@ export function toParticipantResponse(participant: PostRunParticipant) {
     phoneNumber: participant.whatsappPhone,
     depositStatus:
       participant.depositStatus === "Verified" ? "VERIFIED" : "PENDING",
-    depositPaid: participant.depositAmountPaidEgp,
-    amountPaid: participant.depositAmountPaidEgp,
+    depositPaid: depositAmount,
+    depositAmount,
+    amountPaid,
     paymentProofUrl,
     paymentMethod: participant.paymentMethod || "Cash",
     depositPaymentMethod:
       participant.depositPaymentMethod ||
       participant.paymentMethod ||
       "InstaPay",
+    depositTimestamp:
+      participant.depositTimestamp ||
+      (depositAmount > 0 ? participant.createdAt : undefined),
     remainingPaymentMethod:
       participant.remainingPaymentMethod ||
       participant.paymentMethod ||
       "Cash",
-    changeOwed: participant.changeOwed || 0,
-    remainingBalance: participant.remainingBalanceEgp,
+    remainingAmount,
+    remainingTimestamp:
+      participant.remainingTimestamp ||
+      (participant.settlementStatus === "Fully Cleared"
+        ? participant.updatedAt
+        : undefined),
+    changeOwed: sanitizeEGP(participant.changeOwed),
+    remainingBalance,
     paymentStatus:
       participant.settlementStatus === "Free"
         ? "FREE"

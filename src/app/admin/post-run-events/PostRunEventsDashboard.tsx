@@ -16,6 +16,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import { sanitizeEGP } from "@/lib/egp";
 
 type DepositStatus = "PENDING" | "VERIFIED";
 type SettlementStatus = "UNPAID" | "FULLY_CLEARED";
@@ -42,7 +43,7 @@ type PostRunEvent = Readonly<{
   eventTicketPrice: number;
   depositAmount: number;
   standardDeposit: number;
-  paymentInstructions: string;
+  paymentInstructions?: string;
   capacity: number | null;
   createdAt: string;
   updatedAt: string;
@@ -59,10 +60,14 @@ type Participant = Readonly<{
   phoneNumber: string;
   depositStatus: DepositStatus;
   depositPaid: number;
+  depositAmount: number;
   amountPaid: number;
   paymentMethod?: string;
   depositPaymentMethod?: string;
+  depositTimestamp?: string;
   remainingPaymentMethod?: string;
+  remainingAmount: number;
+  remainingTimestamp?: string;
   changeOwed?: number;
   paymentProofUrl: string;
   remainingBalance: number;
@@ -81,7 +86,9 @@ type ParticipantPatch = Readonly<{
   paymentStatus?: PaymentStatus;
   paymentMethod?: string;
   depositPaymentMethod?: string;
+  depositTimestamp?: string;
   remainingPaymentMethod?: string;
+  remainingTimestamp?: string;
   changeOwed?: number;
   paymentProofUrl?: string;
   internalNotes?: string;
@@ -133,11 +140,17 @@ const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const GATE_ROSTER_SYNC_CHANNEL = "glowrunners-gate-roster-v1";
 
 const MONEY_FORMATTER = new Intl.NumberFormat("en-EG", {
-  maximumFractionDigits: 2,
+  maximumFractionDigits: 0,
 });
 
 const DATE_FORMATTER = new Intl.DateTimeFormat("en-EG", {
   dateStyle: "medium",
+  timeZone: "Africa/Cairo",
+});
+
+const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-EG", {
+  dateStyle: "medium",
+  timeStyle: "short",
   timeZone: "Africa/Cairo",
 });
 
@@ -152,18 +165,22 @@ function readError(payload: unknown, fallback: string) {
 }
 
 function formatMoney(value: number) {
-  const safeValue = Number.isFinite(value) ? value : 0;
+  const safeValue = sanitizeEGP(value);
   return `${MONEY_FORMATTER.format(safeValue)} EGP`;
 }
 
 function formatCompactMoney(value: number) {
-  const safeValue = Number.isFinite(value) ? Math.max(0, value) : 0;
+  const safeValue = Math.max(0, sanitizeEGP(value));
   return MONEY_FORMATTER.format(safeValue);
 }
 
 function safeNonNegativeNumber(value: unknown) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+  return Math.max(
+    0,
+    sanitizeEGP(
+      typeof value === "number" || typeof value === "string" ? value : 0,
+    ),
+  );
 }
 
 function notifyGateRosterChanged() {
@@ -224,6 +241,17 @@ function formatEventDate(value: string) {
   return Number.isNaN(date.getTime()) ? value : DATE_FORMATTER.format(date);
 }
 
+function formatPaymentTimestamp(value?: string) {
+  if (!value) {
+    return "Not logged";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Not logged"
+    : TIMESTAMP_FORMATTER.format(date);
+}
+
 function isIsoDate(value: unknown): value is string {
   if (typeof value !== "string" || !ISO_DATE_PATTERN.test(value)) {
     return false;
@@ -277,13 +305,8 @@ function paymentState(participant: Participant, event: PostRunEvent) {
     };
   }
 
-  const amountPaid = Number.isFinite(participant.amountPaid)
-    ? Math.max(0, participant.amountPaid)
-    : 0;
-  const remaining = Math.max(
-    0,
-    Math.round((event.totalCost - amountPaid) * 100) / 100,
-  );
+  const amountPaid = Math.max(0, sanitizeEGP(participant.amountPaid));
+  const remaining = Math.max(0, sanitizeEGP(event.totalCost - amountPaid));
 
   if (amountPaid <= 0) {
     return {
@@ -628,12 +651,16 @@ function EventFormFields({
             type="number"
             required
             min="0"
-            step="0.01"
-            inputMode="decimal"
+            step="1"
+            inputMode="numeric"
             value={form.totalCost}
-            onChange={(event) =>
-              onChange({ ...form, totalCost: event.target.value })
-            }
+            onChange={(event) => {
+              const value = event.target.value;
+              onChange({
+                ...form,
+                totalCost: value === "" ? "" : String(sanitizeEGP(value)),
+              });
+            }}
             className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
           />
         </label>
@@ -643,12 +670,17 @@ function EventFormFields({
             type="number"
             required
             min="0"
-            step="0.01"
-            inputMode="decimal"
+            step="1"
+            inputMode="numeric"
             value={form.depositAmount}
-            onChange={(event) =>
-              onChange({ ...form, depositAmount: event.target.value })
-            }
+            onChange={(event) => {
+              const value = event.target.value;
+              onChange({
+                ...form,
+                depositAmount:
+                  value === "" ? "" : String(sanitizeEGP(value)),
+              });
+            }}
             className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-3 text-base font-black normal-case tracking-normal text-white outline-none focus:border-fuchsia-400"
           />
         </label>
@@ -659,7 +691,7 @@ function EventFormFields({
           {formatMoney(
             Math.max(
               0,
-              Number(form.totalCost || 0) - Number(form.depositAmount || 0),
+              sanitizeEGP(form.totalCost) - sanitizeEGP(form.depositAmount),
             ),
           )}
         </span>
@@ -679,9 +711,8 @@ function EventFormFields({
         />
       </label>
       <label className="text-xs font-black uppercase tracking-wide text-zinc-400">
-        Payment instructions
+        Payment instructions (optional)
         <textarea
-          required
           maxLength={2000}
           rows={3}
           value={form.paymentInstructions}
@@ -1171,8 +1202,16 @@ export function PostRunEventsDashboard() {
         "Cash"
       ).toLowerCase();
 
-      const depositPortion = Math.min(paid, depositFee);
-      const remainingPortion = Math.max(0, paid - depositPortion);
+      const depositPortion = Math.min(
+        paid,
+        safeNonNegativeNumber(p.depositAmount ?? p.depositPaid ?? depositFee),
+      );
+      const remainingPortion = Math.min(
+        Math.max(0, paid - depositPortion),
+        safeNonNegativeNumber(
+          p.remainingAmount ?? Math.max(0, paid - depositPortion),
+        ),
+      );
 
       if (
         depositMethod.includes("instapay") ||
@@ -1199,7 +1238,14 @@ export function PostRunEventsDashboard() {
       totalChangeOwed += change;
     });
 
-    const collected = safeNonNegativeNumber(cashCollected + digitalCollected);
+    const collected = participants.reduce(
+      (sum, participant) =>
+        sum +
+        (participant.paymentStatus === "FREE"
+          ? 0
+          : safeNonNegativeNumber(participant.amountPaid)),
+      0,
+    );
 
 
     return {
@@ -1208,9 +1254,9 @@ export function PostRunEventsDashboard() {
       payingCount,
       expected,
       collected,
-      remaining: Math.max(0, expected - collected),
-      cashCollected,
-      digitalCollected,
+      remaining: Math.max(0, sanitizeEGP(expected - collected)),
+      cashCollected: sanitizeEGP(cashCollected),
+      digitalCollected: sanitizeEGP(digitalCollected),
       totalChangeOwed,
     };
   }, [participants, selectedEvent]);
@@ -1308,7 +1354,7 @@ export function PostRunEventsDashboard() {
       depositAmount: String(selectedEvent.depositAmount),
       capacity:
         selectedEvent.capacity === null ? "" : String(selectedEvent.capacity),
-      paymentInstructions: selectedEvent.paymentInstructions,
+      paymentInstructions: selectedEvent.paymentInstructions ?? "",
     });
     setEventModal("edit");
   };
@@ -1336,10 +1382,10 @@ export function PostRunEventsDashboard() {
         body: JSON.stringify({
           title: eventForm.title,
           runDate: eventForm.runDate,
-          eventTicketPrice: Number(eventForm.totalCost),
-          standardDeposit: Number(eventForm.depositAmount),
-          totalCost: Number(eventForm.totalCost),
-          depositAmount: Number(eventForm.depositAmount),
+          eventTicketPrice: sanitizeEGP(eventForm.totalCost),
+          standardDeposit: sanitizeEGP(eventForm.depositAmount),
+          totalCost: sanitizeEGP(eventForm.totalCost),
+          depositAmount: sanitizeEGP(eventForm.depositAmount),
           capacity: eventForm.capacity ? Number(eventForm.capacity) : null,
           paymentInstructions: eventForm.paymentInstructions,
         }),
@@ -1390,8 +1436,8 @@ export function PostRunEventsDashboard() {
           body: JSON.stringify({
             title: eventForm.title,
             runDate: eventForm.runDate,
-            eventTicketPrice: Number(eventForm.totalCost),
-            standardDeposit: Number(eventForm.depositAmount),
+            eventTicketPrice: sanitizeEGP(eventForm.totalCost),
+            standardDeposit: sanitizeEGP(eventForm.depositAmount),
             capacity: eventForm.capacity ? Number(eventForm.capacity) : null,
             paymentInstructions: eventForm.paymentInstructions,
           }),
@@ -1691,7 +1737,8 @@ export function PostRunEventsDashboard() {
       const nextStatus = patch.paymentStatus ?? participant.paymentStatus;
       const nextAmount = nextStatus === "FREE"
         ? 0
-        : patch.amountPaid ?? participant.amountPaid;
+        : sanitizeEGP(patch.amountPaid ?? participant.amountPaid);
+      const optimisticTimestamp = new Date().toISOString();
       const optimisticState = paymentState(
         {
           ...participant,
@@ -1712,17 +1759,27 @@ export function PostRunEventsDashboard() {
           participant.depositPaymentMethod ??
           participant.paymentMethod ??
           "InstaPay",
+        depositTimestamp:
+          patch.depositTimestamp ??
+          participant.depositTimestamp ??
+          (nextAmount > 0 ? optimisticTimestamp : undefined),
         remainingPaymentMethod:
           patch.remainingPaymentMethod ??
           participant.remainingPaymentMethod ??
           participant.paymentMethod ??
           "Cash",
+        remainingTimestamp:
+          patch.remainingTimestamp ??
+          participant.remainingTimestamp ??
+          (nextStatus === "FULLY_CLEARED" ? optimisticTimestamp : undefined),
         changeOwed:
           patch.changeOwed !== undefined
             ? patch.changeOwed
             : participant.changeOwed || 0,
         amountPaid: nextAmount,
-        depositPaid: nextAmount,
+        depositPaid: Math.min(nextAmount, selectedEvent.depositAmount),
+        depositAmount: Math.min(nextAmount, selectedEvent.depositAmount),
+        remainingAmount: Math.max(0, nextAmount - selectedEvent.depositAmount),
         remainingBalance: optimisticState.remaining,
         depositStatus:
           optimisticState.kind === "unpaid" || optimisticState.kind === "free"
@@ -1732,7 +1789,7 @@ export function PostRunEventsDashboard() {
           optimisticState.kind === "cleared"
             ? "FULLY_CLEARED"
             : "UNPAID",
-        updatedAt: new Date().toISOString(),
+        updatedAt: optimisticTimestamp,
       };
 
       setParticipants((current) =>
@@ -1807,13 +1864,20 @@ export function PostRunEventsDashboard() {
       return;
     }
 
+    const remainingMethod = method ?? "Cash";
     const updated = await updateParticipant(
       participant,
       {
-        amountPaid: selectedEvent.totalCost,
+        amountPaid: sanitizeEGP(selectedEvent.totalCost),
         paymentStatus: "FULLY_CLEARED",
-        paymentMethod: method ?? participant.paymentMethod ?? "Cash",
-        changeOwed: changeOwed ?? 0,
+        paymentMethod: remainingMethod,
+        depositPaymentMethod:
+          participant.depositPaymentMethod || "InstaPay",
+        depositTimestamp:
+          participant.depositTimestamp || participant.createdAt,
+        remainingPaymentMethod: remainingMethod,
+        remainingTimestamp: new Date().toISOString(),
+        changeOwed: sanitizeEGP(changeOwed ?? 0),
       },
       "clear",
     );
@@ -2663,7 +2727,7 @@ export function PostRunEventsDashboard() {
                             );
                             setDraggingParticipantId("");
                           }}
-                          className={`flex h-12 min-w-0 items-center justify-between gap-1.5 border-b border-zinc-800 px-2 py-1 last:border-b-0 ${
+                          className={`flex min-h-14 min-w-0 items-center justify-between gap-1 border-b border-zinc-800 px-2 py-1.5 last:border-b-0 ${
                             draggingParticipantId === participant.id
                               ? "bg-zinc-900 opacity-70"
                               : "bg-zinc-950 hover:bg-zinc-900/40"
@@ -2738,7 +2802,7 @@ export function PostRunEventsDashboard() {
                             </span>
                           </button>
 
-                          <div className="flex shrink-0 items-center gap-1.5">
+                          <div className="flex max-w-[58%] shrink-0 flex-wrap items-center justify-end gap-1">
                             {(() => {
                               const depMethod = (
                                 participant.depositPaymentMethod ||
@@ -2764,6 +2828,10 @@ export function PostRunEventsDashboard() {
                                   (selectedEvent?.depositAmount ?? 200) &&
                                 isDigitalDep !== isDigitalRem;
 
+                              if (participant.depositAmount <= 0) {
+                                return null;
+                              }
+
                               return (
                                 <span
                                   className={`rounded-full px-1.5 py-0.5 text-[8px] font-black whitespace-nowrap border ${
@@ -2774,13 +2842,8 @@ export function PostRunEventsDashboard() {
                                         : "border-emerald-800/50 bg-emerald-950/80 text-emerald-300"
                                   }`}
                                 >
-                                  {hasSplit
-                                    ? isDigitalDep
-                                      ? "📱 Dep / 💵 Cash"
-                                      : "💵 Dep / 📱 Inst"
-                                    : isDigitalRem || isDigitalDep
-                                      ? "📱 InstaPay"
-                                      : "💵 Cash"}
+                                  {isDigitalDep ? "📱" : "💵"} Dep:{" "}
+                                  {formatCompactMoney(participant.depositAmount)}
                                 </span>
                               );
                             })()}
@@ -2804,7 +2867,7 @@ export function PostRunEventsDashboard() {
                               {(Number(participant.changeOwed) || 0) > 0
                                 ? `🔴 Change: ${participant.changeOwed} EGP`
                                 : isCleared
-                                  ? "🟢 Cleared"
+                                  ? `${participant.remainingPaymentMethod === "InstaPay" ? "📱" : "💵"} Rem: ${formatCompactMoney(participant.remainingAmount)}`
                                   : state.kind === "free"
                                     ? "🎁 Free"
                                     : state.remaining > 0
@@ -2817,21 +2880,23 @@ export function PostRunEventsDashboard() {
                               type="button"
                               disabled={
                                 isSelectedEventArchived ||
-                                isCleared ||
-                                state.kind === "free" ||
                                 isAnyBusy
                               }
                               onClick={(event) => {
                                 event.stopPropagation();
-                                void clearParticipant(participant);
+                                handleOpenEditModal(participant);
                               }}
                               className={`h-8 min-w-12 shrink-0 rounded-lg px-2 text-[10px] font-black active:scale-95 transition-all ${
-                                isCleared
-                                  ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                                  : "bg-emerald-400 text-black hover:bg-emerald-300 shadow-md"
+                                state.kind === "deposit"
+                                  ? "bg-emerald-400 text-black hover:bg-emerald-300 shadow-md"
+                                  : "border border-zinc-700 bg-zinc-900 text-zinc-200"
                               } disabled:opacity-50`}
                             >
-                              {isBusy ? "…" : isCleared ? "✓" : "Clear"}
+                              {isBusy
+                                ? "…"
+                                : state.kind === "deposit"
+                                  ? "Settle"
+                                  : "Edit"}
                             </button>
                           </div>
                         </article>
@@ -3004,13 +3069,14 @@ export function PostRunEventsDashboard() {
             const directWhatsappPhone = whatsappPhone(
               selectedParticipant.phoneNumber,
             );
+            const paymentInstructions = selectedEvent.paymentInstructions?.trim();
             const depositRequest = `Hi ${selectedParticipant.fullName}! You are registered for ${selectedEvent.title} on ${formatEventDate(
               selectedEvent.runDate,
             )}. Total cost: ${formatMoney(
               selectedEvent.totalCost,
             )}. Required deposit: ${formatMoney(
               selectedEvent.depositAmount,
-            )}. Payment instructions: ${selectedEvent.paymentInstructions}`;
+            )}.${paymentInstructions ? ` Payment instructions: ${paymentInstructions}` : ""}`;
             const balanceNotice = `Hi ${selectedParticipant.fullName}! We received ${formatMoney(
               state.amountPaid,
             )} for ${selectedEvent.title}. Your remaining balance due on Friday is ${formatMoney(
@@ -3053,17 +3119,80 @@ export function PostRunEventsDashboard() {
                   Contact: {selectedParticipant.phoneNumber || "Not provided"}
                 </p>
 
+                {state.kind !== "free" ? (
+                  <div className="rounded-xl border border-sky-900/60 bg-sky-950/20 p-3">
+                    <p className="text-[10px] font-black uppercase tracking-wide text-sky-300">
+                      Payment timeline
+                    </p>
+                    <div className="mt-2 space-y-2 text-xs font-bold">
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <span className="text-zinc-400">Deposit</span>
+                        <span className="min-w-0 text-right text-white">
+                          📱 {selectedParticipant.depositPaymentMethod || "InstaPay"} ·{" "}
+                          {formatMoney(selectedParticipant.depositAmount)}
+                          <small className="block text-[10px] font-semibold text-zinc-500">
+                            {formatPaymentTimestamp(selectedParticipant.depositTimestamp)}
+                          </small>
+                        </span>
+                      </div>
+                      <div className="h-px bg-zinc-800" />
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <span className="text-zinc-400">
+                          {state.remaining > 0 ? "Remaining owed" : "Remainder settled"}
+                        </span>
+                        <span className="min-w-0 text-right text-amber-300">
+                          {state.remaining > 0
+                            ? formatMoney(state.remaining)
+                            : `${selectedParticipant.remainingPaymentMethod === "InstaPay" ? "📱" : "💵"} ${selectedParticipant.remainingPaymentMethod || "Cash"} · ${formatMoney(selectedParticipant.remainingAmount)}`}
+                          {selectedParticipant.remainingTimestamp ? (
+                            <small className="block text-[10px] font-semibold text-zinc-500">
+                              {formatPaymentTimestamp(selectedParticipant.remainingTimestamp)}
+                            </small>
+                          ) : null}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                {state.kind === "deposit" && !isSelectedEventArchived ? (
+                  <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      disabled={isAnyBusy}
+                      onClick={() => {
+                        setSelectedParticipantId("");
+                        void clearParticipant(selectedParticipant, "Cash");
+                      }}
+                      className="min-h-12 rounded-xl bg-emerald-400 px-3 text-xs font-black text-black disabled:opacity-50"
+                    >
+                      💵 Collect {formatMoney(state.remaining)} Cash
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isAnyBusy}
+                      onClick={() => {
+                        setSelectedParticipantId("");
+                        void clearParticipant(selectedParticipant, "InstaPay");
+                      }}
+                      className="min-h-12 rounded-xl bg-sky-400 px-3 text-xs font-black text-black disabled:opacity-50"
+                    >
+                      📱 Verify {formatMoney(state.remaining)} InstaPay
+                    </button>
+                  </div>
+                ) : null}
+
                 {!isSelectedEventArchived ? (
                   <form
                     onSubmit={(event) => {
                       event.preventDefault();
-                      const draftedAmount = Number(paymentDraft);
+                      const draftedAmount = sanitizeEGP(paymentDraft);
                       const amountPaid =
                         paymentStatusDraft === "FREE" ||
                         paymentStatusDraft === "UNPAID"
                           ? 0
                           : paymentStatusDraft === "FULLY_CLEARED"
-                            ? Number(selectedEvent.eventTicketPrice) || 0
+                            ? sanitizeEGP(selectedEvent.eventTicketPrice)
                             : draftedAmount;
 
                       if (!Number.isFinite(amountPaid) || amountPaid < 0) {
@@ -3088,6 +3217,15 @@ export function PostRunEventsDashboard() {
                           paymentMethod: remainingPaymentMethodDraft,
                           depositPaymentMethod: depositPaymentMethodDraft,
                           remainingPaymentMethod: remainingPaymentMethodDraft,
+                          depositTimestamp:
+                            selectedParticipant.depositTimestamp ||
+                            (amountPaid > 0
+                              ? selectedParticipant.createdAt
+                              : undefined),
+                          remainingTimestamp:
+                            paymentStatusDraft === "FULLY_CLEARED"
+                              ? new Date().toISOString()
+                              : selectedParticipant.remainingTimestamp,
                         },
                         "edit",
                       );
@@ -3163,7 +3301,7 @@ export function PostRunEventsDashboard() {
                           setPaymentDraft("0");
                         } else if (status === "FULLY_CLEARED") {
                           setPaymentDraft(
-                            String(Number(selectedEvent.eventTicketPrice) || 0),
+                            String(sanitizeEGP(selectedEvent.eventTicketPrice)),
                           );
                         }
                       }}
@@ -3180,12 +3318,17 @@ export function PostRunEventsDashboard() {
                     <input
                       type="number"
                       min="0"
-                      step="0.01"
-                      inputMode="decimal"
+                      step="1"
+                      inputMode="numeric"
                       required
                       disabled={paymentStatusDraft !== "DEPOSIT_PAID"}
                       value={paymentDraft}
-                      onChange={(event) => setPaymentDraft(event.target.value)}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setPaymentDraft(
+                          value === "" ? "" : String(sanitizeEGP(value)),
+                        );
+                      }}
                       className="mt-1.5 min-h-12 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-base font-black outline-none focus:border-emerald-400"
                     />
                   </label>
@@ -3201,19 +3344,22 @@ export function PostRunEventsDashboard() {
                         step="1"
                         placeholder="0"
                         value={amountReceivedDraft}
-                        onChange={(event) =>
-                          setAmountReceivedDraft(event.target.value)
-                        }
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setAmountReceivedDraft(
+                            value === "" ? "" : String(sanitizeEGP(value)),
+                          );
+                        }}
                         className="mt-1.5 min-h-12 w-full min-w-0 rounded-xl border border-zinc-700 bg-black px-4 text-base font-black text-white outline-none focus:border-emerald-400"
                       />
                       {(() => {
                         const currentPendingChange =
-                          Number(selectedParticipant.changeOwed) || 0;
-                        const received = Number(amountReceivedDraft) || 0;
+                          sanitizeEGP(selectedParticipant.changeOwed);
+                        const received = sanitizeEGP(amountReceivedDraft);
                         const targetOwed = state.remaining;
                         const change =
                           received > 0 && targetOwed > 0 && received > targetOwed
-                            ? received - targetOwed
+                            ? sanitizeEGP(received - targetOwed)
                             : 0;
 
                         if (currentPendingChange > 0 && received === 0) {
@@ -3249,12 +3395,12 @@ export function PostRunEventsDashboard() {
 
                   {(() => {
                     const currentPendingChange =
-                      Number(selectedParticipant.changeOwed) || 0;
-                    const received = Number(amountReceivedDraft) || 0;
+                      sanitizeEGP(selectedParticipant.changeOwed);
+                    const received = sanitizeEGP(amountReceivedDraft);
                     const targetOwed = state.remaining;
                     const change =
                       received > 0 && targetOwed > 0 && received > targetOwed
-                        ? received - targetOwed
+                        ? sanitizeEGP(received - targetOwed)
                         : 0;
 
                     return (
@@ -3292,15 +3438,18 @@ export function PostRunEventsDashboard() {
                                   fullName: participantNameDraft,
                                   phoneNumber: participantContactDraft,
                                   amountPaid:
-                                    Number(selectedEvent.eventTicketPrice) ||
-                                    selectedParticipant.amountPaid +
-                                      state.remaining,
+                                    sanitizeEGP(selectedEvent.eventTicketPrice) ||
+                                    sanitizeEGP(
+                                      selectedParticipant.amountPaid +
+                                        state.remaining,
+                                    ),
                                   paymentStatus: "FULLY_CLEARED",
                                   paymentMethod: remainingPaymentMethodDraft,
                                   depositPaymentMethod:
                                     depositPaymentMethodDraft,
                                   remainingPaymentMethod:
                                     remainingPaymentMethodDraft,
+                                  remainingTimestamp: new Date().toISOString(),
                                   changeOwed: change,
                                 },
                                 "edit",
